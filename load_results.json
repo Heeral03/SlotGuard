@@ -1,0 +1,106 @@
+{
+  "config": {
+    "total_users": 10000,
+    "total_seats": 100,
+    "contention_ratio": "100.0:1"
+  },
+  "throughput": {
+    "wall_clock_seconds": 1.951,
+    "total_operations": 10100,
+    "ops_per_second": 5178.0,
+    "definition": "10000 hold attempts + 100 confirm attempts = 10100 total ops / 1.951s wall clock"
+  },
+  "hold": {
+    "granted": 100,
+    "denied": 9900,
+    "success_rate": "1.0%",
+    "latency": {
+      "count": 10000,
+      "min_ms": 0.09,
+      "p50_ms": 9.74,
+      "p90_ms": 10.75,
+      "p95_ms": 11.13,
+      "p99_ms": 15.08,
+      "max_ms": 125.33,
+      "avg_ms": 9.25,
+      "stddev_ms": 6.93
+    }
+  },
+  "confirm": {
+    "success": 100,
+    "failed": 0,
+    "latency": {
+      "count": 100,
+      "min_ms": 20.38,
+      "p50_ms": 33.98,
+      "p90_ms": 53.74,
+      "p95_ms": 68.67,
+      "p99_ms": 137.48,
+      "max_ms": 137.48,
+      "avg_ms": 41.98,
+      "stddev_ms": 20.07,
+      "sample_size_note": "\u26a0 Small sample (n=100): p95/p99 are statistically thin. p99 is essentially the 99th of 100 samples."
+    },
+    "phase_breakdown_avg_ms": {
+      "redis_check_ms": 16.97,
+      "pg_conn_acquire_ms": 7.09,
+      "pg_insert_commit_ms": 5.21,
+      "redis_promote_ms": 12.4
+    }
+  },
+  "errors": [],
+  "audit": {
+    "passed": true,
+    "message": "No double bookings. 100 seats confirmed."
+  },
+  "naive_baseline": {
+    "total_bookings": 38,
+    "unique_seats_booked": 10,
+    "oversold_seats": 10,
+    "oversold_examples": [
+      [
+        1,
+        4
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        4,
+        4
+      ],
+      [
+        5,
+        4
+      ],
+      [
+        6,
+        4
+      ],
+      [
+        7,
+        4
+      ],
+      [
+        8,
+        4
+      ],
+      [
+        9,
+        3
+      ],
+      [
+        10,
+        3
+      ]
+    ],
+    "naive_users": 500,
+    "naive_seats": 10,
+    "contention_per_seat": 50
+  }
+}
