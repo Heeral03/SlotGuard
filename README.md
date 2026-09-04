@@ -17,30 +17,6 @@ It is engineered to solve **"Refresh Stampedes"** in high-demand appointment sys
 
 High-demand public infrastructure platforms face severe stampede risks under burst traffic. SlotGuard solves these using an **Event-Driven Multi-Worker Architecture**:
 
-```mermaid
-sequenceDiagram
-    participant Citizen as Citizen Client
-    participant API as FastAPI REST Service
-    participant Redis as Redis (Lua + Pub/Sub)
-    participant Outbox as PG Transactional Outbox
-    participant ExpiryWorker as Expiry Worker Daemon
-    participant CDCWorker as Outbox CDC Worker
-
-    Citizen->>API: POST /api/v1/slots/{id}/hold
-    API->>Redis: EVAL hold.lua (atomic GET + SET + EXPIRE)
-    Redis-->>API: Hold Granted (120s TTL)
-
-    alt TTL Expires without confirmation
-        Redis->>ExpiryWorker: Pub/Sub Event __keyevent@0__:expired
-        ExpiryWorker->>Redis: EVAL waitlist_offer.lua (ZPOPMIN + Auto-Hold)
-        Redis-->>ExpiryWorker: Auto-offered slot to next waitlisted citizen!
-    else Citizen Confirms
-        Citizen->>API: POST /api/v1/slots/{id}/confirm
-        API->>Outbox: BEGIN; INSERT INTO bookings; INSERT INTO outbox; COMMIT;
-        Outbox-->>CDCWorker: SELECT ... FOR UPDATE SKIP LOCKED
-        CDCWorker->>CDCWorker: Async Event Handler (Simulated Message Broker / Webhook Consumer)
-    end
-```
 
 ### 1. Redis Keyspace Event-Driven Expiry Worker (`expiry_worker.py`)
 - Enables Redis Keyspace Notifications (`notify-keyspace-events Ex`).
