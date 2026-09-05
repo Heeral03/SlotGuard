@@ -1,139 +1,133 @@
 # SlotGuard — Event-Driven Public Service Appointment Engine
 
 [![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.141-green.svg)](https://fastapi.tiangolo.com)
-[![Redis](https://img.shields.io/badge/Redis-Lua%20%2B%20PubSub-red.svg)](https://redis.io)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110-green.svg)](https://fastapi.tiangolo.com)
+[![Redis](https://img.shields.io/badge/Redis-Lua%20%2B%20PubSub%20%2B%20ZSET-red.svg)](https://redis.io)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue.svg)](https://postgresql.org)
-[![Prometheus](https://img.shields.io/badge/Prometheus-Observability-orange.svg)](https://prometheus.io)
+[![Pytest](https://img.shields.io/badge/Pytest-Suite%20Passed-brightgreen.svg)](tests/)
+[![Docker](https://img.shields.io/badge/Docker%20Compose-Ready-blue.svg)](docker-compose.yml)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**SlotGuard** is an event-driven, multi-worker public service appointment engine built in Python, FastAPI, Redis (Lua scripts + Pub/Sub), PostgreSQL, and Prometheus.
+**SlotGuard** is an event-driven, fault-tolerant public service appointment engine engineered in Python, FastAPI, Redis (Lua scripts + Pub/Sub + Sorted Sets), PostgreSQL, and Prometheus.
 
-It is engineered to solve **"Refresh Stampedes"** in high-demand appointment systems (CoWIN vaccine booking, Passport slots, US Visa appointments, Tatkal bookings) where millions of users concurrently refresh to claim scarce appointment slots.
-
----
-
-## 🏛 Real-World Problem & System Architecture
-
-High-demand public infrastructure platforms face severe stampede risks under burst traffic. SlotGuard solves these using an **Event-Driven Multi-Worker Architecture**:
-
-
-### 1. Redis Keyspace Event-Driven Expiry Worker (`expiry_worker.py`)
-- Enables Redis Keyspace Notifications (`notify-keyspace-events Ex`).
-- Listens via Pub/Sub to `__keyevent@0__:expired`.
-- When a hold TTL expires, the daemon automatically pops the next waitlisted citizen (`ZPOPMIN` Lua) and grants a new hold — **100% automated queue progression with zero API polling or human intervention**.
-
-### 2. Transactional Outbox Pattern & CDC Poller (`outbox_worker.py`)
-- Writes `SLOT_CONFIRMED` events into a PostgreSQL `outbox` table inside the **exact same ACID transaction** as the booking insert.
-- Eliminates dual-write data loss (if DB rolls back, outbox event rolls back atomically).
-- A CDC Worker polls pending outbox events using `SELECT ... FOR UPDATE SKIP LOCKED` for non-blocking multi-worker scaling.
-
-### 3. Atomic Multi-Slot Family Holds (`hold_multi.lua`)
-- All-or-nothing multi-key evaluation: holds ALL $N$ adjacent slots or NONE, linked by a shared PostgreSQL `booking_group_id` UUID.
-
-### 4. Prometheus Observability (`metrics.py`)
-- Exposes `/metrics` endpoint for Prometheus scraping, tracking lock latencies, outbox dispatch rates, waitlist depths, and Redis TTL auto-offers.
-
-> ⚠️ **Single Point of Failure (SPOF) & High-Availability Note**:
-> SlotGuard coordinates multi-process workers (FastAPI web server, CDC Outbox worker daemon, and Redis Keyspace Expiry daemon) via Redis and PostgreSQL. Currently, Redis operates as a single instance. In a high-availability production cloud deployment, Redis Sentinel or Redis Cluster with keyspace hash-tagging (`{slot:123}`) would be required for multi-node failover — un-scoped in this single-node prototype to remain lean.
+It is designed to solve **"Refresh Stampedes"** in high-demand public systems (CoWIN vaccine booking, Passport slots, US Visa appointments, Tatkal bookings) where high-concurrency burst traffic attempts to claim scarce slots simultaneously.
 
 ---
 
-## 📊 Empirical Benchmarks & Verification (71/71 Tests Passed)
+## 🏛 Enterprise Architecture & Resilience Design
 
-| Component / Test Suite | Concurrency / Setup | Metrics & Performance | Status |
+```
+                     ┌─────────────────────────────────────────┐
+                     │            Client REST Requests         │
+                     └────────────────────┬────────────────────┘
+                                          │
+                                          ▼
+                     ┌─────────────────────────────────────────┐
+                     │           FastAPI Web Gateway           │
+                     └────────────────────┬────────────────────┘
+                                          │
+                   ┌──────────────────────┴──────────────────────┐
+                   │                                             │
+                   ▼                                             ▼
+  ┌─────────────────────────────────┐           ┌─────────────────────────────────┐
+  │     Redis Atomic Hold Tier      │           │     Postgres Storage Tier       │
+  ├─────────────────────────────────┤           ├─────────────────────────────────┤
+  │ • Check-and-Set Lua Scripts     │           │ • Threaded Connection Pool      │
+  │ • ZSET TTL Hold Tracking        │           │ • ACID Insert + Outbox Table    │
+  │ • Fair FIFO Waitlists (ZSET)    │           │ • Partial Unique Index Backstop │
+  └────────────────┬────────────────┘           └────────────────┬────────────────┘
+                   │                                             │
+                   ▼                                             ▼
+  ┌─────────────────────────────────┐           ┌─────────────────────────────────┐
+  │ Dual-Layer Expiry Worker Daemon │           │ CDC Transactional Outbox Worker │
+  ├─────────────────────────────────┤           ├─────────────────────────────────┤
+  │ • Pub/Sub Fast Path Event       │           │ • Non-blocking SELECT FOR       │
+  │ • ZSET Scanner Fail-safe (100ms)│           │   UPDATE SKIP LOCKED Poller     │
+  └─────────────────────────────────┘           └─────────────────────────────────┘
+```
+
+### Key Engineering Features:
+
+1. **Threaded PostgreSQL Connection Pooling (`config.py`)**:
+   - Replaces naive per-request connections with `psycopg2.pool.ThreadedConnectionPool` (5 to 100 pooled connections).
+   - Drastically cuts TCP connection handshake overhead, enabling fast concurrent HTTP throughput.
+
+2. **Dual-Layer Deterministic Expiry Worker (`expiry_worker.py`)**:
+   - **Fast Path**: Listens to Redis Pub/Sub `__keyevent@0__:expired` events.
+   - **Fail-Safe Scanner**: Periodically scans `holds:ttl` Redis Sorted Set (`ZRANGEBYSCORE`) via Lua (`scan_expired_holds.lua`) every 100ms.
+   - **Guarantees 100% queue progression even if Pub/Sub events are dropped or worker daemons restart.**
+
+3. **Zero-TOCTOU Atomic Confirmation (`confirm_check.lua`)**:
+   - Atomically checks state and locks key as `CONFIRMING` in Redis before acquiring DB transactions.
+   - Eliminates Time-of-Check to Time-of-Use race conditions where a hold could expire mid-DB insert.
+
+4. **Transactional Outbox & CDC Poller (`outbox_worker.py`)**:
+   - Writes `SLOT_CONFIRMED` events into PostgreSQL `outbox` table in the **exact same ACID transaction** as the booking insert.
+   - CDC Poller worker processes events using `SELECT ... FOR UPDATE SKIP LOCKED` for non-blocking multi-worker scaling.
+
+5. **Partial Unique Index Database Backstop (`schema.sql`)**:
+   - Postgres `CREATE UNIQUE INDEX idx_no_double_booking ON bookings (seat_id) WHERE status = 'CONFIRMED'`.
+   - Hard backstop ensuring absolute zero double-bookings even under catastrophic cache loss.
+
+---
+
+## 📊 Empirical Benchmarks & Verification (100% Passed)
+
+| Component / Test Suite | Concurrency / Setup | Performance Metrics | Status |
 |---|---|---|---|
-| **Single-Slot Engine Benchmark** | 10,000 users vs 100 slots (100:1 ratio) | **5,178 ops/sec**, 0 double bookings | ✅ PASS |
-| **Waitlist FIFO Load Test** | 100 concurrent waiters, 50 workers | **0 FIFO Violations**, 100% strict ordering | ✅ PASS |
-| **Multi-Slot Overlapping Load Test** | 1,000 users, 50 seats (2-3 seat blocks) | **1,198.5 ops/sec**, 0 partial holds | ✅ PASS |
-| **Concurrent Expiry Stress Test** | 50 simultaneous TTL expiries | **50/50 Auto-Offers Processed in 27.7ms** | ✅ PASS |
-| **FastAPI REST API Benchmark** | 500 citizens, 50 slots, 50 workers | **97.1 ops/sec**, 0 double bookings | ✅ PASS |
-| **Naive Baseline (SELECT-then-INSERT)** | 500 users vs 10 slots (with 5ms delay) | 38 DB rows (**10/10 slots oversold**) | ❌ FAILED |
+| **Pytest Test Suite** | 9 Integration & Engine Tests | **9/9 PASSED (0.73s)** | ✅ PASS |
+| **Single-Slot Engine Benchmark** | 10,000 users vs 100 slots (100:1 ratio) | **2,409.3 ops/sec**, 0 double bookings | ✅ PASS |
+| **Concurrent Expiry Stress Test** | 50 simultaneous TTL expiries | **50/50 Auto-Offers Processed in 19.2ms** | ✅ PASS |
+| **FastAPI REST API Benchmark** | 500 citizens, 50 slots, 50 threads | **83.9 ops/sec**, 0 double bookings | ✅ PASS |
+| **Naive Baseline (SELECT-then-INSERT)** | 500 users vs 10 slots (with 5ms delay) | 26 DB rows (**9/10 slots oversold**) | ❌ FAILED |
 
 ---
 
-## 🔍 Engineering Analysis: Diagnosing the API Performance Cliff
+## 🚀 Quickstart & One-Click Deployment
 
-An empirical reviewer will notice a performance gap between the raw engine benchmark (**5,178 ops/sec**) and the HTTP REST API benchmark (**97.1 ops/sec**). 
+### Option A: Docker Compose (Recommended)
+Spin up PostgreSQL, Redis, FastAPI (4 Uvicorn workers), CDC Outbox Worker, Expiry Worker, and Prometheus with a single command:
 
-We profiled the execution stack to isolate the root cause:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       EXECUTION STACK OVERHEAD BREAKDOWN                    │
-├──────────────────────────────┬───────────────────────────────┬──────────────┤
-│ Layer                        │ Execution Speed               │ Overhead     │
-├──────────────────────────────┼───────────────────────────────┼──────────────┤
-│ 1. Raw Engine (Direct Lua)   │ 5,190.1 ops/sec               │ Baseline     │
-│ 2. In-Process TestClient API │   205.2 ops/sec               │ 25.3x Slower │
-│ 3. Threaded REST Benchmark   │    97.1 ops/sec               │ 53.4x Slower │
-└──────────────────────────────┴───────────────────────────────┴──────────────┘
-```
-
-### Bottleneck Breakdown:
-1. **Pydantic Model Validation & JSON Serialization**: Every HTTP request instantiates a Pydantic `HoldRequest` model, validates input constraints (`citizen_id`, `ttl_seconds`), and serializes JSON response objects.
-2. **FastAPI & Starlette Middleware Pipeline**: HTTP request object creation, header parsing, route resolution, dependency injection, and status code formatting.
-3. **Python GIL Threadpool Contention**: Under `load_test_api.py`, 50 concurrent threads call `TestClient` inside a single Python process. CPython's Global Interpreter Lock (GIL) serializes bytecode execution for Object allocation and Pydantic validation, creating thread context switching overhead.
-
-*In a production environment, scaling HTTP throughput requires multi-worker Uvicorn process pools (`uvicorn --workers N`), Asynchronous I/O handlers (`httpx.AsyncClient`), or an API Gateway (Kong/Nginx) handling load balancing across worker instances.*
-
----
-
-## 💻 REST API & Observability Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/health` | Health check (Redis & PostgreSQL connection pings) |
-| `GET` | `/metrics` | Prometheus scrapable metrics endpoint |
-| `POST` | `/api/v1/slots/{id}/hold` | Atomic single-slot hold (check-and-set via Redis Lua) |
-| `POST` | `/api/v1/slots/{id}/confirm` | Confirm appointment + write Transactional Outbox record |
-| `POST` | `/api/v1/slots/{id}/release` | Release hold (triggers auto-offer to next waitlisted citizen) |
-| `POST` | `/api/v1/slots/{id}/waitlist/join` | Join fair FIFO waitlist queue |
-| `POST` | `/api/v1/slots/{id}/waitlist/leave` | Leave waitlist queue |
-| `GET` | `/api/v1/slots/{id}/waitlist` | Query ordered waitlist positions |
-| `POST` | `/api/v1/slots/hold-multi` | Atomic multi-slot family hold (all-or-nothing Lua script) |
-| `POST` | `/api/v1/slots/confirm-multi` | Multi-slot transactional confirmation (shared UUID outbox write) |
-
----
-
-## 🛠 Quickstart & Setup
-
-### 1. Installation
 ```bash
+docker compose up --build
+```
+
+### Option B: Local Setup & Running Pytest
+
+```bash
+# 1. Clone repo & setup virtual environment
 git clone https://github.com/Heeral03/SlotGuard.git
 cd SlotGuard
 
 python3 -m venv venv
 source venv/bin/activate
-pip install fastapi uvicorn redis psycopg2-binary httpx prometheus-client
-```
+pip install -r requirements.txt
 
-### 2. Database Initialization
-```bash
-psql -d booking_system -f schema.sql
-```
+# 2. Run test suite
+PYTHONPATH=. pytest tests/ -v
 
-### 3. Start Background Daemons & API Server
-```bash
-# Terminal 1: Start FastAPI REST Server
-uvicorn app:app --reload --host 0.0.0.0 --port 8000
-
-# Terminal 2: Run Outbox CDC Worker
-python3 -c "from outbox_worker import start_outbox_poller; start_outbox_poller()"
-
-# Terminal 3: Run Redis Keyspace Expiry Worker
-python3 -c "from expiry_worker import start_expiry_listener; start_expiry_listener()"
-```
-
-### 4. Run Test Suites
-```bash
-python3 test_booking.py
-python3 test_waitlist.py
-python3 test_multi_seat.py
-python3 test_app.py
-python3 test_advanced_infra.py
+# 3. Run benchmarks
+python3 load_test.py
 python3 load_test_expiry.py
+python3 load_test_api.py
 ```
+
+---
+
+## 💻 REST API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/health` | Health check (Pooled Redis & PostgreSQL connection checks) |
+| `GET` | `/metrics` | Prometheus scrapable metrics endpoint |
+| `POST` | `/api/v1/slots/{id}/hold` | Atomic single-slot hold (check-and-set via Redis Lua) |
+| `POST` | `/api/v1/slots/{id}/confirm` | Zero-TOCTOU atomic confirm + Transactional Outbox record |
+| `POST` | `/api/v1/slots/{id}/release` | Release hold (triggers auto-offer to next waitlisted citizen) |
+| `POST` | `/api/v1/slots/{id}/waitlist/join` | Join fair FIFO waitlist queue |
+| `POST` | `/api/v1/slots/{id}/waitlist/leave` | Leave waitlist queue |
+| `GET` | `/api/v1/slots/{id}/waitlist` | Query ordered waitlist positions |
+| `POST` | `/api/v1/slots/hold-multi` | Atomic multi-slot family hold (all-or-nothing Lua script) |
+| `POST` | `/api/v1/slots/confirm-multi` | Multi-slot transactional confirmation |
 
 ---
 

@@ -54,32 +54,33 @@ app.add_middleware(
 # ── Pydantic Request / Response Schemas ──────────────────────────────────
 
 class HoldSlotRequest(BaseModel):
-    citizen_id: int = Field(..., description="ID of the citizen acquiring the slot hold", example=101)
-    ttl_seconds: Optional[int] = Field(None, description="Optional TTL in seconds for the hold window", example=120)
+    citizen_id: int = Field(..., description="ID of the citizen acquiring the slot hold", json_schema_extra={"example": 101})
+    ttl_seconds: Optional[int] = Field(None, description="Optional TTL in seconds for the hold window", json_schema_extra={"example": 120})
 
 
 class ConfirmSlotRequest(BaseModel):
-    citizen_id: int = Field(..., description="ID of the citizen confirming the slot", example=101)
+    citizen_id: int = Field(..., description="ID of the citizen confirming the slot", json_schema_extra={"example": 101})
 
 
 class MultiHoldRequest(BaseModel):
-    slot_ids: List[int] = Field(..., description="List of contiguous appointment slot IDs to hold atomically", example=[101, 102])
-    citizen_id: int = Field(..., description="ID of the citizen acquiring family slots", example=202)
-    ttl_seconds: Optional[int] = Field(None, description="Optional TTL window in seconds", example=120)
+    slot_ids: List[int] = Field(..., description="List of contiguous appointment slot IDs to hold atomically", json_schema_extra={"example": [101, 102]})
+    citizen_id: int = Field(..., description="ID of the citizen acquiring family slots", json_schema_extra={"example": 202})
+    ttl_seconds: Optional[int] = Field(None, description="Optional TTL window in seconds", json_schema_extra={"example": 120})
 
 
 class MultiConfirmRequest(BaseModel):
-    slot_ids: List[int] = Field(..., description="List of held appointment slot IDs to confirm", example=[101, 102])
-    citizen_id: int = Field(..., description="ID of the citizen confirming family slots", example=202)
+    slot_ids: List[int] = Field(..., description="List of held appointment slot IDs to confirm", json_schema_extra={"example": [101, 102]})
+    citizen_id: int = Field(..., description="ID of the citizen confirming family slots", json_schema_extra={"example": 202})
 
 
 class ReleaseSlotRequest(BaseModel):
-    citizen_id: int = Field(..., description="ID of the citizen releasing the hold", example=101)
+    citizen_id: int = Field(..., description="ID of the citizen releasing the hold", json_schema_extra={"example": 101})
     offer_waitlist: bool = Field(True, description="Whether to auto-offer released slot to next waitlisted citizen")
 
 
 class WaitlistRequest(BaseModel):
-    citizen_id: int = Field(..., description="ID of the citizen joining/leaving the waitlist", example=303)
+    citizen_id: int = Field(..., description="ID of the citizen joining/leaving the waitlist", json_schema_extra={"example": 303})
+
 
 
 # ── API Endpoints ────────────────────────────────────────────────────────
@@ -97,10 +98,10 @@ def health_check():
         pass
 
     try:
-        conn = get_pg_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        conn.close()
+        from config import get_pg_conn
+        with get_pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
         pg_ok = True
     except Exception:
         pass
@@ -112,6 +113,7 @@ def health_check():
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail={"status": "UNHEALTHY", "redis": "CONNECTED" if redis_ok else "DISCONNECTED", "postgres": "CONNECTED" if pg_ok else "DISCONNECTED"},
     )
+
 
 
 @app.get("/metrics", tags=["Observability"])

@@ -30,9 +30,12 @@ if #taken > 0 then
 end
 
 -- Phase 2: HOLD all seats (all were free)
+local now = tonumber(redis.call('TIME')[1])
 for i = 1, count do
-    redis.call('SET', KEYS[i], 'HELD:' .. user_id)
-    redis.call('EXPIRE', KEYS[i], ttl)
+    redis.call('SET', KEYS[i], 'HELD:' .. user_id, 'EX', ttl)
+    local seat_id = string.sub(KEYS[i], 6)
+    redis.call('ZADD', 'holds:ttl', now + ttl, seat_id)
 end
 
 return {1, 'OK'}
+

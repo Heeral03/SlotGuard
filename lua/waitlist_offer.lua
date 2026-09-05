@@ -26,7 +26,11 @@ end
 local user_id = next_user[1]  -- member (user_id as string)
 
 -- Place the hold for this user
-redis.call('SET', KEYS[1], 'HELD:' .. user_id)
-redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+local ttl = tonumber(ARGV[1])
+redis.call('SET', KEYS[1], 'HELD:' .. user_id, 'EX', ttl)
+local seat_id = string.sub(KEYS[1], 6)
+local now = tonumber(redis.call('TIME')[1])
+redis.call('ZADD', 'holds:ttl', now + ttl, seat_id)
 
 return user_id
+

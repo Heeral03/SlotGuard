@@ -23,7 +23,7 @@ import psycopg2
 import psycopg2.errors
 import redis
 
-from config import get_redis_client, get_pg_connection, HOLD_TTL_SECONDS, PG_DSN
+from config import get_redis_client, get_pg_conn, get_pg_connection, HOLD_TTL_SECONDS
 from metrics import (
     SLOTGUARD_HOLDS_TOTAL,
     SLOTGUARD_CONFIRMS_TOTAL,
@@ -48,17 +48,23 @@ _redis: redis.Redis = get_redis_client()
 _hold_script = _redis.register_script(_load_lua("hold.lua"))
 _waitlist_offer_script = _redis.register_script(_load_lua("waitlist_offer.lua"))
 _hold_multi_script = _redis.register_script(_load_lua("hold_multi.lua"))
+_confirm_check_script = _redis.register_script(_load_lua("confirm_check.lua"))
+_scan_expired_script = _redis.register_script(_load_lua("scan_expired_holds.lua"))
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  SINGLE-SEAT HOLD & CONFIRM (unchanged API, enhanced release)
+#  SINGLE-SEAT HOLD & CONFIRM (Atomic check-and-set + Pooled DB)
 # ═══════════════════════════════════════════════════════════════════════
 
 def hold_seat(seat_id: int, user_id: int, ttl: int | None = None) -> bool:
     """Attempt to place a temporary hold on a single seat."""
     ttl = ttl or HOLD_TTL_SECONDS
     result = _hold_script(keys=[f"seat:{seat_id}"], args=[user_id, ttl])
-    return result == 1
+    if result == 1:
+        SLOTGUARD_HOLDS_TOTAL.labels(status="success").inc()
+        return True
+    SLOTGUARD_HOLDS_TOTAL.labels(status="conflict").inc()
+    return False
 
 
 def confirm_booking(
@@ -66,62 +72,63 @@ def confirm_booking(
     booking_group_id: str | None = None,
 ) -> Tuple[bool, str, Optional[dict]]:
     """
-    Confirm a previously held seat.
+    Confirm a previously held seat atomically without TOCTOU race conditions.
+    Uses pooled DB connections for maximum HTTP throughput.
 
     Returns (success, message, timings).
     """
     timings: dict = {} if profile else None
-
     key = f"seat:{seat_id}"
 
+    # Step 1 — Atomic Redis Check & State Lock (Prevents TTL expiration during DB write)
     t0 = time.perf_counter() if profile else 0
-    current = _redis.get(key)
+    check_ok = _confirm_check_script(keys=[key], args=[user_id])
     if profile:
         timings["redis_check_s"] = time.perf_counter() - t0
 
-    if current is None:
-        return False, "Hold expired — no active hold on this seat", timings
+    if check_ok == 0:
+        current = _redis.get(key)
+        status_msg = current.decode() if current else "FREE/EXPIRED"
+        return False, f"Hold invalid or expired (current state: {status_msg})", timings
 
-    expected = f"HELD:{user_id}".encode()
-    if current != expected:
-        return False, f"Hold invalid (current state: {current.decode()})", timings
-
+    # Step 2 — Pooled Postgres ACID Insert + Transactional Outbox
     t1 = time.perf_counter() if profile else 0
-    conn = psycopg2.connect(**PG_DSN)
-    if profile:
-        timings["pg_conn_acquire_s"] = time.perf_counter() - t1
-
     try:
-        t2 = time.perf_counter() if profile else 0
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO bookings (seat_id, user_id, status, booking_group_id) "
-                "VALUES (%s, %s, 'CONFIRMED', %s)",
-                (seat_id, user_id, booking_group_id),
-            )
-            outbox_payload = json.dumps({"seat_id": seat_id, "user_id": user_id, "confirmed_at": time.time()})
-            cur.execute(
-                "INSERT INTO outbox (event_type, aggregate_id, payload) VALUES ('SLOT_CONFIRMED', %s, %s)",
-                (str(seat_id), outbox_payload),
-            )
-        conn.commit()
+        with get_pg_conn() as conn:
+            if profile:
+                timings["pg_conn_acquire_s"] = time.perf_counter() - t1
 
-        if profile:
-            timings["pg_insert_commit_s"] = time.perf_counter() - t2
+            t2 = time.perf_counter() if profile else 0
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO bookings (seat_id, user_id, status, booking_group_id) "
+                    "VALUES (%s, %s, 'CONFIRMED', %s)",
+                    (seat_id, user_id, booking_group_id),
+                )
+                outbox_payload = json.dumps({"seat_id": seat_id, "user_id": user_id, "confirmed_at": time.time()})
+                cur.execute(
+                    "INSERT INTO outbox (event_type, aggregate_id, payload) VALUES ('SLOT_CONFIRMED', %s, %s)",
+                    (str(seat_id), outbox_payload),
+                )
+            conn.commit()
+
+            if profile:
+                timings["pg_insert_commit_s"] = time.perf_counter() - t2
     except psycopg2.errors.UniqueViolation:
-        conn.rollback()
+        # Revert Redis state if Postgres unique constraint catches a duplicate
+        _redis.set(key, f"HELD:{user_id}")
         return False, "Seat already confirmed (Postgres constraint caught race)", timings
     except Exception as exc:
-        conn.rollback()
+        _redis.set(key, f"HELD:{user_id}")
         return False, f"Database error: {exc}", timings
-    finally:
-        conn.close()
 
+    # Step 3 — Promote state in Redis
     t3 = time.perf_counter() if profile else 0
     _redis.set(key, "CONFIRMED")
     if profile:
         timings["redis_promote_s"] = time.perf_counter() - t3
 
+    SLOTGUARD_CONFIRMS_TOTAL.labels(status="success").inc()
     return True, "Booking confirmed", timings
 
 
@@ -146,6 +153,7 @@ def release_hold(seat_id: int, user_id: int, offer_waitlist: bool = True) -> boo
         return False
 
     _redis.delete(key)
+    _redis.zrem("holds:ttl", str(seat_id))
 
     if offer_waitlist:
         _offer_to_next_in_waitlist(seat_id)
@@ -168,10 +176,13 @@ def join_waitlist(seat_id: int, user_id: int) -> Tuple[bool, str]:
         return False, "Seat is free — hold it directly instead"
 
     wl_key = f"waitlist:{seat_id}"
-    # ZADD NX: only add if not already in the set
     added = _redis.zadd(wl_key, {str(user_id): time.time()}, nx=True)
     if added:
+        SLOTGUARD_WAITLIST_JOIN_TOTAL.inc()
+        depth = _redis.zcard(wl_key)
+        SLOTGUARD_WAITLIST_DEPTH.labels(slot_id=str(seat_id)).set(depth)
         return True, f"Added to waitlist (position: {_redis.zrank(wl_key, str(user_id)) + 1})"
+
     return False, "Already on the waitlist"
 
 
@@ -198,9 +209,8 @@ def _offer_to_next_in_waitlist(
         keys=[f"seat:{seat_id}", f"waitlist:{seat_id}"],
         args=[ttl],
     )
-    if result == 0:
+    if result == 0 or result is None:
         return None
-    # result is the user_id as bytes
     return int(result)
 
 
@@ -213,9 +223,6 @@ def hold_seats(
 ) -> Tuple[bool, str]:
     """
     Atomically hold ALL requested seats, or NONE.
-
-    Returns (success, message).
-    If success=False, message lists which seats were taken.
     """
     ttl = ttl or HOLD_TTL_SECONDS
     keys = [f"seat:{sid}" for sid in seat_ids]
@@ -225,13 +232,14 @@ def hold_seats(
         args=[user_id, ttl, len(seat_ids)],
     )
 
-    # result is [status, detail]
     status_code = result[0]
     detail = result[1].decode() if isinstance(result[1], bytes) else str(result[1])
 
     if status_code == 1:
+        SLOTGUARD_HOLDS_TOTAL.labels(status="success").inc()
         return True, f"All {len(seat_ids)} seats held"
     else:
+        SLOTGUARD_HOLDS_TOTAL.labels(status="conflict").inc()
         return False, f"Some seats taken: {detail}"
 
 
@@ -239,49 +247,44 @@ def confirm_seats(
     seat_ids: List[int], user_id: int,
 ) -> Tuple[bool, str]:
     """
-    Confirm ALL held seats in a single Postgres transaction.
-    All-or-nothing: if any seat fails, the entire transaction rolls back.
-
-    Seats are linked by a shared booking_group_id.
+    Confirm ALL held seats in a single Postgres transaction using pooled connections.
+    All-or-nothing atomic verification.
     """
-    # Step 1 — verify all holds in Redis
+    # Step 1 — Verify and lock state for all seats atomically in Redis
     for sid in seat_ids:
-        current = _redis.get(f"seat:{sid}")
-        expected = f"HELD:{user_id}".encode()
-        if current != expected:
-            status = current.decode() if current else "FREE"
-            return False, f"Seat {sid} not held by user {user_id} (state: {status})"
+        check_ok = _confirm_check_script(keys=[f"seat:{sid}"], args=[user_id])
+        if check_ok == 0:
+            return False, f"Seat {sid} not held by user {user_id} or expired"
 
-    # Step 2 — single Postgres transaction for all seats
+    # Step 2 — Single Postgres transaction using pool
     group_id = str(uuid.uuid4())
-    conn = get_pg_connection()
     try:
-        with conn.cursor() as cur:
-            for sid in seat_ids:
-                cur.execute(
-                    "INSERT INTO bookings (seat_id, user_id, status, booking_group_id) "
-                    "VALUES (%s, %s, 'CONFIRMED', %s)",
-                    (sid, user_id, group_id),
-                )
-                outbox_payload = json.dumps({"seat_id": sid, "user_id": user_id, "group_id": group_id, "confirmed_at": time.time()})
-                cur.execute(
-                    "INSERT INTO outbox (event_type, aggregate_id, payload) VALUES ('SLOT_CONFIRMED', %s, %s)",
-                    (str(sid), outbox_payload),
-                )
-        conn.commit()
+        with get_pg_conn() as conn:
+            with conn.cursor() as cur:
+                for sid in seat_ids:
+                    cur.execute(
+                        "INSERT INTO bookings (seat_id, user_id, status, booking_group_id) "
+                        "VALUES (%s, %s, 'CONFIRMED', %s)",
+                        (sid, user_id, group_id),
+                    )
+                    outbox_payload = json.dumps({"seat_id": sid, "user_id": user_id, "group_id": group_id, "confirmed_at": time.time()})
+                    cur.execute(
+                        "INSERT INTO outbox (event_type, aggregate_id, payload) VALUES ('SLOT_CONFIRMED', %s, %s)",
+                        (str(sid), outbox_payload),
+                    )
+            conn.commit()
     except psycopg2.IntegrityError as e:
-        conn.rollback()
+        for sid in seat_ids:
+            _redis.set(f"seat:{sid}", f"HELD:{user_id}")
         return False, f"DB IntegrityError: One or more seats already confirmed ({e})"
     except Exception as e:
-        conn.rollback()
+        for sid in seat_ids:
+            _redis.set(f"seat:{sid}", f"HELD:{user_id}")
         return False, f"DB Error: {e}"
-    finally:
-        conn.close()
 
-    # Step 3 — promote all seats to CONFIRMED in Redis
+    # Step 3 — Promote all seats to CONFIRMED in Redis
     for sid in seat_ids:
-        r = get_redis_client()
-        r.set(f"seat:{sid}", "CONFIRMED")
+        _redis.set(f"seat:{sid}", "CONFIRMED")
 
     SLOTGUARD_CONFIRMS_TOTAL.labels(status="success").inc()
     return True, f"All {len(seat_ids)} seats confirmed (group: {group_id})"
@@ -290,10 +293,7 @@ def confirm_seats(
 def release_holds(
     seat_ids: List[int], user_id: int, offer_waitlist: bool = True
 ) -> Tuple[int, int]:
-    """
-    Release holds on multiple seats. Returns (released_count, failed_count).
-    Optionally offers each released seat to the next waitlisted user.
-    """
+    """Release holds on multiple seats."""
     released = 0
     failed = 0
     for sid in seat_ids:

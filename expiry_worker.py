@@ -1,9 +1,10 @@
 """
-SlotGuard — Event-Driven Redis Keyspace Expiry Worker
-─────────────────────────────────────────────────────
-Listens to Redis Pub/Sub '__keyevent@0__:expired' events. When a slot hold TTL
-expires, this daemon automatically pops the next waitlisted citizen via Lua (ZPOPMIN)
-and grants a new hold — requiring zero human or API polling intervention.
+SlotGuard — Event-Driven & Deterministic Redis Expiry Worker
+─────────────────────────────────────────────────────────────
+Dual-Layer Hybrid Expiry Resolution:
+1. Fast-path: Listens to Redis Pub/Sub '__keyevent@0__:expired' events.
+2. Deterministic Poller: Scans Redis 'holds:ttl' ZSET via Lua script (scan_expired_holds.lua)
+   every 100ms — guaranteeing ZERO dropped expiries even on Pub/Sub drops or worker restarts.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ import time
 import threading
 import redis
 
-from config import get_redis_client
-from booking import _offer_to_next_in_waitlist
+from config import get_redis_client, HOLD_TTL_SECONDS
+from booking import _offer_to_next_in_waitlist, _scan_expired_script
 from metrics import SLOTGUARD_EXPIRY_AUTO_OFFERS_TOTAL
 
 
@@ -57,15 +58,52 @@ def handle_expiry_event(key_str: str) -> bool:
         return False
 
 
+def run_zset_expiry_poller(poll_interval: float = 0.1, stop_event=None):
+    """
+    Deterministic ZSET TTL Scanner loop.
+    Scans 'holds:ttl' ZSET every poll_interval seconds as a fail-safe backstop.
+    """
+    print(f"[ExpiryWorker] Started ZSET TTL Poller (interval={poll_interval}s)...")
+    while True:
+        if stop_event and stop_event.is_set():
+            print("[ExpiryWorker] Stopping ZSET TTL Poller daemon.")
+            break
+
+        try:
+            now_ts = int(time.time())
+            results = _scan_expired_script(args=[now_ts, HOLD_TTL_SECONDS])
+            if results:
+                for item in results:
+                    item_str = item.decode() if isinstance(item, bytes) else str(item)
+                    print(f"[ExpiryWorker] ZSET Scanner auto-processed expired seat hold: {item_str}")
+                    SLOTGUARD_EXPIRY_AUTO_OFFERS_TOTAL.labels(result="zset_processed").inc()
+        except Exception as e:
+            print(f"[ExpiryWorker] ZSET Poller error: {e}")
+
+        time.sleep(poll_interval)
+
+
 def start_expiry_listener(stop_event=None):
-    """Subscribe to Redis expired events and process them in real time."""
+    """
+    Start dual-layer expiry listener:
+    1. Spawns ZSET polling thread for deterministic cleanup.
+    2. Subscribes main thread to Pub/Sub events for real-time fast path.
+    """
     r = get_redis_client()
     enable_redis_keyspace_events(r)
+
+    # Spawn ZSET Poller thread
+    poller_thread = threading.Thread(
+        target=run_zset_expiry_poller,
+        args=(0.1, stop_event),
+        daemon=True
+    )
+    poller_thread.start()
 
     pubsub = r.pubsub()
     pubsub.subscribe("__keyevent@0__:expired")
 
-    print("[ExpiryWorker] Subscribed to '__keyevent@0__:expired'. Waiting for TTL expiration events...")
+    print("[ExpiryWorker] Subscribed to '__keyevent@0__:expired' + ZSET Poller active.")
 
     for message in pubsub.listen():
         if stop_event and stop_event.is_set():

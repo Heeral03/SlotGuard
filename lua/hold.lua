@@ -12,9 +12,13 @@
 local current = redis.call('GET', KEYS[1])
 
 if current == false then
-    redis.call('SET', KEYS[1], 'HELD:' .. ARGV[1])
-    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+    local ttl = tonumber(ARGV[2])
+    redis.call('SET', KEYS[1], 'HELD:' .. ARGV[1], 'EX', ttl)
+    local seat_id = string.sub(KEYS[1], 6)
+    local now = tonumber(redis.call('TIME')[1])
+    redis.call('ZADD', 'holds:ttl', now + ttl, seat_id)
     return 1
 else
     return 0
 end
+

@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: slotguard_postgres
+    environment:
+      POSTGRES_DB: booking_system
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d booking_system"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: slotguard_redis
+    command: redis-server --notify-keyspace-events Ex
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: slotguard_api
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DB=booking_system
+      - PG_USER=postgres
+      - PG_PASSWORD=postgrespassword
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  outbox_worker:
+    build: .
+    container_name: slotguard_outbox_worker
+    command: python3 -c "from outbox_worker import start_outbox_poller; start_outbox_poller()"
+    environment:
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_DB=booking_system
+      - PG_USER=postgres
+      - PG_PASSWORD=postgrespassword
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  expiry_worker:
+    build: .
+    container_name: slotguard_expiry_worker
+    command: python3 -c "from expiry_worker import start_expiry_listener; start_expiry_listener()"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: slotguard_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    depends_on:
+      - api
