@@ -2,7 +2,17 @@
 
 SlotGuard is a high-concurrency seat booking and rate-limiting engine built with Express, Redis, and PostgreSQL. It guarantees atomic seat holds, prevents double-booking race conditions, and enforces token-bucket rate limits across API endpoints.
 
+## Tech Stack
+
+- **Runtime**: Node.js / ES Modules
+- **Framework**: Express.js
+- **In-Memory Store**: Redis (ioredis with embedded Lua scripting)
+- **Database**: PostgreSQL (`pg` pool, ACID transactions, partial unique indexes)
+- **Authentication**: JSON Web Tokens (`jsonwebtoken`)
+- **Testing**: Custom asynchronous concurrency & rate limiting test suite (`Promise.all`)
+
 ## Features
+
 
 - **Atomic Seat Holding**: Uses Redis Lua scripts (`holdSeat`) to acquire seat locks atomically with a 60-second TTL.
 - **Race-Condition Free Confirmation**: Converts Redis holds into permanent PostgreSQL database records inside ACID transactions (`confirmHold`).
