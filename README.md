@@ -4,72 +4,91 @@ A distributed, high-concurrency seat/resource booking engine built to eliminate 
 
 ## System Architecture
 
+### Overview
+
 ```mermaid
 flowchart TD
-    subgraph Clients["Clients & Edge"]
-        C1["HTTP Client (User A)"]
-        C2["HTTP / SSE Client (User B)"]
+    subgraph Layer1["1. CLIENT LAYER"]
+        direction TB
+        C1["HTTP Client\n(Hold / Confirm / Waitlist)"]
+        C2["SSE Stream Client\n(Real-Time Listener)"]
     end
 
-    subgraph LoadBalancer["Multi-Instance API Cluster"]
-        S1["Server Instance A\n(PORT 3000)"]
-        S2["Server Instance B\n(PORT 3001)"]
+    subgraph Layer2["2. MULTI-INSTANCE API CLUSTER"]
+        direction TB
+        S1["Server Instance A (PORT 3000)"]
+        S2["Server Instance B (PORT 3001)"]
+        MW["Middleware Pipeline\n(Auth ➔ Waiting Room ➔ Rate Limiter ➔ Idempotency)"]
     end
 
-    subgraph Middleware["Middleware Pipeline"]
-        M1["Auth (JWT)"]
-        M2["Virtual Waiting Room"]
-        M3["Token Bucket Rate Limiter"]
-        M4["Idempotency Cache"]
+    subgraph Layer3["3. SHARED REDIS IN-MEMORY LAYER"]
+        direction TB
+        LUA[("Atomic Lua Scripts\n(holdSeat / confirmHold)")]
+        KEYS[("Redis Keys & Sorted Sets\n(seat:* / waitlist:* / queue:*)")]
+        PUBSUB[("Pub/Sub Channels\n(queue:admissions / queue:reassignments)")]
+        QUEUE[("BullMQ Queue\n(hold-expiry delayed jobs)")]
     end
 
-    subgraph Redis["Redis (Shared State & Pub/Sub)"]
-        R1[("Atomic Lua Scripts\nholdSeat / confirmHold")]
-        R2[("Sorted Sets\nwaitlist:seatId / queue:waiting")]
-        R3[("Pub/Sub Channels\nqueue:admissions / queue:reassignments")]
-        R4[("BullMQ Queue\nhold-expiry")]
+    subgraph Layer4["4. DISTRIBUTED WORKER CLUSTER"]
+        direction TB
+        W1["Worker Instance 1 (WORKER_ID worker-1)"]
+        W2["Worker Instance 2 (WORKER_ID worker-2)"]
     end
 
-    subgraph Workers["Distributed Background Workers"]
-        W1["Worker Instance 1\n(WORKER_ID worker-1)"]
-        W2["Worker Instance 2\n(WORKER_ID worker-2)"]
+    subgraph Layer5["5. PERSISTENCE STORAGE LAYER"]
+        direction TB
+        DB[("PostgreSQL Database\n(bookings table + Partial Unique Index)")]
     end
 
-    subgraph Postgres["PostgreSQL Storage"]
-        DB[("Database: bookings Table\nUnique Index (seat_id WHERE status='CONFIRMED')")]
-    end
+    Layer1 --> Layer2
+    Layer2 --> MW
+    MW --> Layer3
+    Layer3 --> Layer4
+    Layer4 --> Layer5
+    Layer2 --> Layer5
+```
 
-    %% Client Interactions
-    C1 -->|"POST /slots/:id/hold"| S1
-    C2 -->|"GET /queue/stream"| S2
-    C2 -->|"POST /slots/:id/waitlist"| S2
-    C2 -->|"POST /slots/:id/confirm"| S2
+### Core Execution Flows
 
-    %% Server Internal Routing & Redis State
-    S1 --> M1 --> M2 --> M3 --> R1
-    S2 --> M1 --> M2 --> M3 --> R1
-    S2 --> M4
-    
-    %% Stream & Waitlist
-    S2 -->|"Subscribe SSE"| R3
-    S2 -->|"ZADD Waitlist"| R2
-    
-    %% Hold Queue Scheduling
-    S1 -->|"Schedule Expiry Job"| R4
-    S2 -->|"Schedule Expiry Job"| R4
+#### 1. Seat Hold & Confirmation Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Client
+    participant API as Express API Node
+    participant Redis as Redis State
+    participant DB as PostgreSQL DB
 
-    %% Worker Operations
-    R4 -->|"Job Lock Claim"| W1
-    R4 -->|"Job Lock Claim"| W2
-    W1 -->|"Check DB & Pop Waitlist"| DB
-    W1 -->|"Hold & Publish Reassignment"| R1
-    W1 -->|"Publish Reassignment"| R3
-    W2 -->|"Check DB & Pop Waitlist"| DB
-    W2 -->|"Hold & Publish Reassignment"| R1
-    W2 -->|"Publish Reassignment"| R3
-    
-    %% Confirmation Transaction
-    S2 -->|"ACID Transaction"| DB
+    User->>API: 1. POST /api/v1/slots/:id/hold
+    API->>Redis: 2. Execute Lua holdSeat()
+    Redis-->>API: 3. Return Success (1) or Conflict (0)
+    API->>Redis: 4. Schedule delayed hold-expiry job (60s)
+    API-->>User: 5. 200 Held / 409 Conflict
+
+    User->>API: 6. POST /api/v1/slots/:id/confirm (Idempotency-Key)
+    API->>Redis: 7. Execute Lua confirmHold()
+    API->>DB: 8. ACID Transaction: INSERT INTO bookings
+    API-->>User: 9. 201 Booking Confirmed
+```
+
+#### 2. Hold Expiry, Waitlist Reassignment & SSE Event Push Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    actor UserB as Waitlisted User
+    participant SSE as SSE Stream Server Node
+    participant Worker as BullMQ Worker Node
+    participant Redis as Redis Pub/Sub & Keys
+
+    UserB->>SSE: 1. GET /api/v1/queue/stream
+    SSE->>Redis: 2. Subscribe (queue:reassignments)
+
+    Note over Worker: 3. 60s Hold Expiry Job Triggers
+    Worker->>Redis: 4. ZPOPMIN waitlist:seatId
+    Worker->>Redis: 5. Reassign hold via Lua holdSeat(UserB)
+    Worker->>Redis: 6. PUBLISH queue:reassignments { UserB, seatId }
+    Redis-->>SSE: 7. Deliver Pub/Sub Message
+    SSE-->>UserB: 8. Push SSE Event: {"status":"seat_reassigned","seatId":"..."}
 ```
 
 ## Core Features
