@@ -56,3 +56,6 @@ export async function runAdmissionCycle(connection) {
 
     return admittedUsers;
 }
+
+export const ADMISSION_CHANNEL = 'queue:admissions';
+export const REASSIGNMENT_CHANNEL = 'queue:reassignments';

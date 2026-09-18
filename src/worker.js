@@ -4,36 +4,37 @@ import { pool } from './db.js';
 import { slotQueue } from './queue.js';
 import { setupGracefulShutdown } from './shutdown.js';
 import { runAdmissionCycle, ADMISSION_INTERVAL_MS } from './waitingRoom.js';
-const connection = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-    maxRetriesPerRequest: null,
-});
+import { registerRedisCommands } from './redisCommands.js';
+import { ADMISSION_CHANNEL, REASSIGNMENT_CHANNEL } from './waitingRoom.js';
+const connection = registerRedisCommands(
+    new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+        maxRetriesPerRequest: null,
+    })
+);
 
-connection.defineCommand('holdSeat', {
-    numberOfKeys: 1,
-    lua: `
-        local current = redis.call('GET', KEYS[1])
-        if current == false then
-            redis.call('SET', KEYS[1], ARGV[1])
-            redis.call('EXPIRE', KEYS[1], ARGV[2])
-            return 1
-        else
-            return 0
-        end
-    `
-});
-
+const WORKER_ID = process.env.WORKER_ID || 'worker-1';
 const ttlSeconds = 60;
 
-setInterval(async () => {
+const admissionInterval = setInterval(async () => {
     try {
         const admitted = await runAdmissionCycle(connection);
         if (admitted.length > 0) {
-            console.log(`[waiting-room] Admitted batch: ${admitted.join(', ')}`);
+            console.log(`[${WORKER_ID}] [waiting-room] Admitted batch: ${admitted.join(', ')}`);
+
+            for(let i=0;i<admitted.length;i++){
+                await connection.publish(ADMISSION_CHANNEL,admitted[i]);
+            }
+
+
+
+
         }
     } catch (err) {
-        console.error('[waiting-room] Admission cycle error:', err);
+        console.error(`[${WORKER_ID}] [waiting-room] Admission cycle error:`, err);
     }
 }, ADMISSION_INTERVAL_MS);
+
+
 
 const worker = new Worker(
     'hold-expiry',
@@ -47,37 +48,38 @@ const worker = new Worker(
             );
 
             if (dbCheck.rows.length > 0) {
-                console.log(`[hold-expiry] Seat ${seatId} was confirmed in time. No action needed.`);
+                console.log(`[${WORKER_ID}] [hold-expiry] Seat ${seatId} was confirmed in time. No action needed.`);
                 return;
             }
 
-            console.log(`[hold-expiry] Seat ${seatId} expired unclaimed. Checking waitlist.`);
+            console.log(`[${WORKER_ID}] [hold-expiry] Seat ${seatId} expired unclaimed. Checking waitlist.`);
             const waitlistKey = `waitlist:${seatId}`;
             const popped = await connection.zpopmin(waitlistKey);
 
             if (popped.length === 0) {
-                console.log(`[hold-expiry] No one on waitlist for seat ${seatId}.`);
+                console.log(`[${WORKER_ID}] [hold-expiry] No one on waitlist for seat ${seatId}.`);
             } else {
                 const nextUser = popped[0];
                 const result = await connection.holdSeat(`seat:${seatId}`, nextUser, ttlSeconds);
 
                 if (result === 1) {
-                    console.log(`[hold-expiry] Reassigned seat ${seatId} to waitlisted user ${nextUser}.`);
+                    console.log(`[${WORKER_ID}] [hold-expiry] Reassigned seat ${seatId} to waitlisted user ${nextUser}.`);
                     await slotQueue.add('check-hold-expiry', { seatId }, { delay: ttlSeconds * 1000 });
-                } else {
-                    console.log(`[hold-expiry] Failed to reassign seat ${seatId} to ${nextUser} — seat was already held.`);
+                    await connection.publish(REASSIGNMENT_CHANNEL, JSON.stringify({ userId: nextUser, seatId }));
+                }else {
+                    console.log(`[${WORKER_ID}] [hold-expiry] Failed to reassign seat ${seatId} to ${nextUser} — seat was already held.`);
                 }
             }
 
         } catch (err) {
-            console.error(`[hold-expiry] Error processing seatId ${seatId}:`, err);
+            console.error(`[${WORKER_ID}] [hold-expiry] Error processing seatId ${seatId}:`, err);
         }
     },
     { connection }
 );
 
 worker.on('failed', (job, err) => {
-    console.error(`[hold-expiry] Job ${job.id} failed:`, err);
+    console.error(`[${WORKER_ID}] [hold-expiry] Job ${job.id} failed:`, err);
 });
 
 setupGracefulShutdown({
@@ -85,5 +87,6 @@ setupGracefulShutdown({
     redis: connection,
     pool,
     queue: slotQueue,
+    intervals: [admissionInterval],
     name: 'Worker'
 });

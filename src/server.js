@@ -9,87 +9,59 @@ import { setupBullBoard } from './dashboard.js';
 import { createHealthRouter } from './health.js';
 import { setupGracefulShutdown } from './shutdown.js';
 import { createAdmissionMiddleware, WAITING_QUEUE_KEY, admittedKey } from './waitingRoom.js';
+import { registerRedisCommands } from './redisCommands.js';
+import { ADMISSION_CHANNEL } from './waitingRoom.js';
+import { addClient, removeClient, sseClients } from './sseConnections.js';
+import { REASSIGNMENT_CHANNEL } from './waitingRoom.js';
 
 const app = express();
 app.use(express.json());
 
-const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+const redis = registerRedisCommands(new Redis(process.env.REDIS_URL || 'redis://localhost:6379'));
+const subscriber = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+
+
+subscriber.subscribe(ADMISSION_CHANNEL, REASSIGNMENT_CHANNEL, (err) => {
+    if (err) {
+        console.error('Failed to subscribe to channels:', err);
+    } else {
+        console.log(`Subscribed to ${ADMISSION_CHANNEL} and ${REASSIGNMENT_CHANNEL}`);
+    }
+});
+
+subscriber.on('message', (channel, message) => {
+    if (channel === ADMISSION_CHANNEL) {
+        const userId = message;
+        const clientRes = sseClients.get(userId);
+
+        if (clientRes) {
+            clientRes.write(`data: ${JSON.stringify({ status: 'admitted' })}\n\n`);
+            console.log(`[SSE] Pushed admission notice to ${userId}`);
+        } else {
+            console.log(`[SSE] ${userId} was admitted but has no open stream connection.`);
+        }
+
+    } else if (channel === REASSIGNMENT_CHANNEL) {
+        const { userId, seatId } = JSON.parse(message);
+        const clientRes = sseClients.get(userId);
+
+        if (clientRes) {
+            clientRes.write(`data: ${JSON.stringify({ status: 'seat_reassigned', seatId })}\n\n`);
+            console.log(`[SSE] Pushed reassignment notice for seat ${seatId} to ${userId}`);
+        } else {
+            console.log(`[SSE] ${userId} was reassigned seat ${seatId} but has no open stream connection.`);
+        }
+    }
+});
 
 // Mount Bull Board dashboard and Health Check endpoint
 setupBullBoard(app, '/admin/queues');
 app.use(createHealthRouter(redis));
 
-// Define Redis Lua Commands
-redis.defineCommand('holdSeat', {
-    numberOfKeys: 1,
-    lua: `
-        local current = redis.call('GET', KEYS[1])
-        if current == false then
-            redis.call('SET', KEYS[1], ARGV[1])
-            redis.call('EXPIRE', KEYS[1], ARGV[2])
-            return 1
-        else
-            return 0
-        end
-    `
-});
-
-redis.defineCommand('checkRateLimit', {
-    numberOfKeys: 1,
-    lua: `
-        local key = KEYS[1]
-        local limit = tonumber(ARGV[1])
-        local window = tonumber(ARGV[2])
-        local now = tonumber(ARGV[3])
-        local bucket = redis.call('HMGET', key, 'tokens', 'last_updated')
-        local tokens = tonumber(bucket[1])
-        local last_updated = tonumber(bucket[2])
-
-        if not tokens then
-            tokens = limit - 1
-            last_updated = now
-            redis.call('HMSET', key, 'tokens', tokens, 'last_updated', last_updated)
-            redis.call('EXPIRE', key, math.ceil(window * 2))
-            return 1
-        else
-            local elapsed = now - last_updated
-            if elapsed < 0 then elapsed = 0 end
-            local refill = elapsed * (limit / window)
-            tokens = math.min(limit, tokens + refill)
-            last_updated = now
-
-            if tokens >= 1 then
-                tokens = tokens - 1
-                redis.call('HMSET', key, 'tokens', tokens, 'last_updated', last_updated)
-                redis.call('EXPIRE', key, math.ceil(window * 2))
-                return 1
-            else
-                redis.call('HMSET', key, 'tokens', tokens, 'last_updated', last_updated)
-                redis.call('EXPIRE', key, math.ceil(window * 2))
-                return 0
-            end
-        end
-    `
-});
-
-redis.defineCommand('confirmHold', {
-    numberOfKeys: 1,
-    lua: `
-        local current = redis.call('GET', KEYS[1])
-        if current == ARGV[1] then
-            redis.call('SET', KEYS[1], 'CONFIRMED')
-            return 1
-        elseif not current then
-            return -1 -- Expired or doesn't exist
-        else
-            return 0  -- Held by someone else or already confirmed
-        end
-    `
-});
-
 const rateLimiterMiddleware = createRateLimiter(redis);
 const idempotencyMiddleware = createIdempotencyMiddleware(redis);
 const admissionMiddleware = createAdmissionMiddleware(redis);
+
 // Secure Route: Auth -> Admission -> Rate Limit -> Hold Logic
 app.post('/api/v1/slots/:id/hold', authMiddleware, admissionMiddleware, rateLimiterMiddleware, async (req, res) => {
     const seatId = req.params.id;
@@ -118,7 +90,7 @@ app.post('/api/v1/slots/:id/hold', authMiddleware, admissionMiddleware, rateLimi
     }
 });
 
-app.post('/api/v1/slots/:id/confirm', authMiddleware, idempotencyMiddleware,rateLimiterMiddleware, async (req, res) => {
+app.post('/api/v1/slots/:id/confirm', authMiddleware, idempotencyMiddleware, rateLimiterMiddleware, async (req, res) => {
     const seatId = req.params.id;
     const userId = req.user.id;
     const seatKey = `seat:${seatId}`;
@@ -152,7 +124,6 @@ app.post('/api/v1/slots/:id/confirm', authMiddleware, idempotencyMiddleware,rate
 
             await client.query('COMMIT');
 
-
             const body = {
                 success: true,
                 message: `Seat ${seatId} successfully booked!`,
@@ -160,19 +131,16 @@ app.post('/api/v1/slots/:id/confirm', authMiddleware, idempotencyMiddleware,rate
                 timestamp: result.rows[0].created_at
             };
 
-            await req.cacheIdempotentResponse(201,body);
+            await req.cacheIdempotentResponse(201, body);
             return res.status(201).json(body);
-
-
 
         } catch (dbErr) {
             await client.query('ROLLBACK');
 
             // If DB write failed, revert Redis state or handle unique constraint gracefully
             if (dbErr.code === '23505') {
-
                 const body = { error: 'Conflict: Seat was already confirmed.' };
-                await req.cacheIdempotentResponse(409,body);
+                await req.cacheIdempotentResponse(409, body);
                 return res.status(409).json(body);
             }
             throw dbErr;
@@ -232,11 +200,36 @@ app.get('/api/v1/queue/status', authMiddleware, async (req, res) => {
     }
 });
 
-const server = app.listen(3000, () => {
-    console.log("SlotGuard engine running on port 3000");
+app.get('/api/v1/queue/stream', authMiddleware, (req, res) => {
+    const userId = req.user.id;
+
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+    });
+
+    addClient(userId, res);
+
+    // Send an initial event immediately, so the client knows the
+    // connection is genuinely open (useful for debugging/confirming).
+    res.write(`data: ${JSON.stringify({ status: 'connected' })}\n\n`);
+
+    // Cleanup: when the client disconnects (closes tab, loses network,
+    // or the connection is otherwise terminated), Express/Node fires
+    // this event. Without this, sseClients would accumulate dead entries.
+    req.on('close', () => {
+        removeClient(userId);
+        console.log(`SSE connection closed for ${userId}`);
+    });
 });
 
 
+
+const PORT = process.env.PORT || 3000;
+const server = app.listen(PORT, () => {
+    console.log(`SlotGuard engine running on port ${PORT}`);
+});
 
 setupGracefulShutdown({
     server,

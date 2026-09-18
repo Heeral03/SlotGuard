@@ -1,4 +1,4 @@
-export function setupGracefulShutdown({ server, worker, redis, pool, queue, name = 'Service', timeoutMs = 10000 }) {
+export function setupGracefulShutdown({ server, worker, redis, pool, queue, intervals = [], name = 'Service', timeoutMs = 10000 }) {
     let isShuttingDown = false;
 
     const shutdown = async (signal) => {
@@ -21,6 +21,18 @@ export function setupGracefulShutdown({ server, worker, redis, pool, queue, name
         }
 
         try {
+            // 0. Clear active intervals (e.g. background worker intervals)
+            if (Array.isArray(intervals)) {
+                for (const interval of intervals) {
+                    if (interval) {
+                        clearInterval(interval);
+                    }
+                }
+                if (intervals.length > 0) {
+                    console.log(`[${name}] Cleared ${intervals.length} active interval(s).`);
+                }
+            }
+
             // 1. Stop HTTP server from receiving new requests
             if (server) {
                 console.log(`[${name}] Closing HTTP server...`);
