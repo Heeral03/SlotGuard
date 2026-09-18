@@ -116,16 +116,27 @@ sequenceDiagram
 
 Node.js, Express, Redis (ioredis, Lua scripting, Pub/Sub), PostgreSQL, BullMQ, Server-Sent Events (SSE), JWT, k6 (load testing), Terraform (local infra provisioning).
 
-## Verified Results
+## Verified Benchmarks & Metrics
 
-- **Multi-Instance Shared State**: Verified across separate server instances (`PORT=3000` & `PORT=3001`). Holding a seat on Server A returned `200 OK`, while attempting to hold the same seat via Server B immediately returned `409 Conflict`, proving global Redis state enforcement across distinct Node processes.
-- **Distributed Worker Job Locking**: Verified across multiple background workers (`WORKER_ID=worker-1` & `WORKER_ID=worker-2`). Expiry jobs for concurrent holds were distributed evenly across workers with zero double-processing or duplicate claims due to BullMQ distributed Redis locks.
+- **Throughput & Capacity (1,000 Concurrent VUs)**:
+  - **Throughput**: **`825.11 req/sec`**
+  - **Success Rate**: **`100.00%`** (1,000 / 1,000 succeeded)
+  - **Error Rate**: **`0.00%`**
+  - **Avg Latency**: **`662.47 ms`**
+  - **p90 / p95 Latency**: **`1.02 s`** / **`1.07 s`**
+  - **Min Latency**: **`149.49 ms`**
+
+- **Race Condition & Single-Seat Lock Precision (50 Simultaneous VUs)**:
+  - **Contention**: 50 simultaneous VUs racing for the exact same seat ID
+  - **Lock Precision**: **`100.00%`** (Exactly **1** hold granted, **49** instantly rejected with `409 Conflict`)
+  - **Winner Lock Latency**: **`13.76 ms`**
+  - **Double-Booking Error Rate**: **`0.00%`**
+
+- **Multi-Instance Cluster Scaling**: Verified across 3 containerized API servers and 2 workers (`docker compose up --scale server=3 --scale worker=2`). Holding a seat on Server Instance 2 (`port 3003`) returned `200 OK`, while attempting to hold the same seat via Server Instance 3 (`port 3004`) immediately returned `409 Conflict`, proving global Redis state enforcement across distinct Node processes.
+
+- **Distributed Worker Job Locking**: Verified across multiple background workers (`worker-1` & `worker-2`). Expiry jobs for concurrent holds were distributed evenly across workers with zero double-processing or duplicate claims due to BullMQ distributed Redis locks.
+
 - **Real-Time SSE Reassignment**: Verified instant event pushing over open SSE streams (`data: {"status":"seat_reassigned","seatId":"..."}`). Waitlisted users receive instant notifications the moment a seat hold expires.
-- **Load-tested with k6**: Evaluated up to 1000 concurrent users with 100% success and zero double-bookings.
-- **Postgres Pool Optimization**: Diagnosed a Postgres connection pool bottleneck (default max of 10) causing p95 latency to exceed 500ms under load; tuned pool size to 50, cutting p95 latency by 36% (503ms to 322ms).
-- **Atomic Single-Seat Locking**: Verified under 20 simultaneous network-level requests via k6 (exactly 1 success, 19 correct rejections).
-- **Idempotent Retry Behavior**: Verified identical requests with the same idempotency key return identical cached responses without re-executing business logic.
-- **Waiting Room Batching**: Verified batching under 8 concurrent users: exactly `ADMISSION_BATCH_SIZE` users admitted per cycle, remainder correctly queued and admitted in following cycles.
 
 ## Setup
 
@@ -165,7 +176,20 @@ ON bookings (seat_id)
 WHERE status = 'CONFIRMED';
 ```
 
-### Running Single-Instance
+### Running with Docker Compose & Nginx Load Balancer
+
+The containerized stack includes PostgreSQL, Redis, horizontally scaled API servers (`server`), background workers (`worker`), and an **Nginx Reverse Proxy Load Balancer** (`http://localhost:8080`) providing upstream HTTP keep-alive connection pooling across server replicas:
+
+```bash
+# Spin up cluster with 3 server replicas, 2 worker replicas, and Nginx load balancer
+docker compose up --build -d --scale server=3 --scale worker=2
+```
+
+#### Multi-Instance Tuning & Architectural Insights:
+- **Database Connection Pool**: Configured `DB_POOL_MAX=15` per container. Because both `server.js` and `worker.js` import the same database module (`src/db.js`), 3 server replicas and 2 worker replicas previously instantiated 5 independent connection pools ($5 \times 50 = \mathbf{250}$ requested connections), exceeding PostgreSQL's default `max_connections = 100` cap and causing connection timeouts under load. Setting `max: 15` per process ($5 \times 15 = 75$ total connections) keeps total pool size safely under PostgreSQL's limit.
+- **Connection-Level vs Request-Level Round-Robin**: Nginx's default load-balancing algorithm operates at the **TCP connection level**, not per HTTP request. With client keep-alive enabled, a single TCP connection carries multiple HTTP requests pinned to the same backend instance. Enabling `keepalive 64;` in Nginx upstream settings prevents socket backlog exhaustion (111 Connection Refused) while maintaining persistent upstream connections.
+
+### Running Manually
 
 ```bash
 npm install

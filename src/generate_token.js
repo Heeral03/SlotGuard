@@ -1,10 +1,16 @@
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
-const JWT_SECRET = 'super_secret_dev_key';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const NUM_USERS = 1
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const tokens = []
+const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_dev_key';
+
+const NUM_USERS = 1000;
+
+const tokens = [];
 
 for (let i = 0; i < NUM_USERS; i++) {
    const userId = `load_test_user_${i}`;
@@ -12,6 +18,7 @@ for (let i = 0; i < NUM_USERS; i++) {
    tokens.push({ userId, token });
 }
 
-fs.writeFileSync('tokens.json', JSON.stringify(tokens, null, 2));
+const outputPath = path.resolve(__dirname, 'tokens.json');
+fs.writeFileSync(outputPath, JSON.stringify(tokens, null, 2));
 
-console.log(`Generated ${tokens.length} tokens -> tokens.json`);
+console.log(`Generated ${tokens.length} tokens -> ${outputPath}`);

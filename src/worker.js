@@ -12,7 +12,7 @@ const connection = registerRedisCommands(
     })
 );
 
-const WORKER_ID = process.env.WORKER_ID || 'worker-1';
+const WORKER_ID = process.env.WORKER_ID || process.env.HOSTNAME || 'worker-1';
 const ttlSeconds = 60;
 
 const admissionInterval = setInterval(async () => {

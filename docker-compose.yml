@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: slotguard-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: slotguard-postgres
+    environment:
+      POSTGRES_USER: heeral
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: booking_system
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heeral -d booking_system"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  server:
+    build: .
+    ports:
+      - "3000-3005:3000"
+    environment:
+      DATABASE_URL: postgresql://heeral:postgres@postgres:5432/booking_system
+      REDIS_URL: redis://redis:6379
+      WAITING_ROOM_ENABLED: "false"
+      JWT_SECRET: super_secret_dev_key
+      PORT: "3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: node src/server.js
+
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://heeral:postgres@postgres:5432/booking_system
+      REDIS_URL: redis://redis:6379
+      WAITING_ROOM_ENABLED: "false"
+      JWT_SECRET: super_secret_dev_key
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    command: node src/worker.js
+
+  nginx:
+    image: nginx:alpine
+    container_name: slotguard-loadbalancer
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - server

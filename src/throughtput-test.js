@@ -27,7 +27,7 @@ export const options = {
   },
 };
 
-const BASE_URL = 'http://localhost:3000';
+const BASE_URLS = ['http://localhost:8080'];
 
 // setup() runs once per test invocation, giving us a fresh, unique
 // run ID each time — so re-running this script never collides with
@@ -40,14 +40,12 @@ export function setup() {
 
 export default function (data) {
   const user = tokens[__VU - 1];
-  // __ITER distinguishes repeat iterations by the SAME VU (shared-iterations
-  // doesn't guarantee exactly one iteration per VU — a fast VU can loop back
-  // and grab another iteration from the shared pool). Without __ITER here,
-  // a VU's second iteration would collide with its own first one.
+  const targetUrl = BASE_URLS[(__VU - 1) % BASE_URLS.length];
+  // __ITER distinguishes repeat iterations by the SAME VU
   const seatId = `capacity_seat_${data.runId}_${__VU}_${__ITER}`;
 
   const res = http.post(
-    `${BASE_URL}/api/v1/slots/${seatId}/hold`,
+    `${targetUrl}/api/v1/slots/${seatId}/hold`,
     null,
     {
       headers: {

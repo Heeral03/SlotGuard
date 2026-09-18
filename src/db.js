@@ -12,7 +12,7 @@ const { Pool } = pkg;
 
 export const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    max: 50, //by default --> it's 10
+    max: process.env.DB_POOL_MAX ? parseInt(process.env.DB_POOL_MAX) : 15,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
 
