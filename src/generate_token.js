@@ -2,7 +2,7 @@ import jwt from 'jsonwebtoken';
 import fs from 'fs';
 const JWT_SECRET = 'super_secret_dev_key';
 
-const NUM_USERS = 2000
+const NUM_USERS = 1
 
 const tokens = []
 

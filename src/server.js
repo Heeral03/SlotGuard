@@ -2,12 +2,22 @@ import express from 'express';
 import Redis from 'ioredis';
 import { authMiddleware } from './middleware/auth.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
+import { createIdempotencyMiddleware } from './middleware/idempotency.js';
 import { pool } from './db.js';
+import { slotQueue } from './queue.js';
+import { setupBullBoard } from './dashboard.js';
+import { createHealthRouter } from './health.js';
+import { setupGracefulShutdown } from './shutdown.js';
+import { createAdmissionMiddleware, WAITING_QUEUE_KEY, admittedKey } from './waitingRoom.js';
 
 const app = express();
 app.use(express.json());
 
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+
+// Mount Bull Board dashboard and Health Check endpoint
+setupBullBoard(app, '/admin/queues');
+app.use(createHealthRouter(redis));
 
 // Define Redis Lua Commands
 redis.defineCommand('holdSeat', {
@@ -78,9 +88,10 @@ redis.defineCommand('confirmHold', {
 });
 
 const rateLimiterMiddleware = createRateLimiter(redis);
-
-// Secure Route: Auth -> Rate Limit -> Hold Logic
-app.post('/api/v1/slots/:id/hold', authMiddleware, rateLimiterMiddleware, async (req, res) => {
+const idempotencyMiddleware = createIdempotencyMiddleware(redis);
+const admissionMiddleware = createAdmissionMiddleware(redis);
+// Secure Route: Auth -> Admission -> Rate Limit -> Hold Logic
+app.post('/api/v1/slots/:id/hold', authMiddleware, admissionMiddleware, rateLimiterMiddleware, async (req, res) => {
     const seatId = req.params.id;
     const userId = req.user.id; // Extracted safely from verified JWT token
     const ttlSeconds = 60;
@@ -94,6 +105,9 @@ app.post('/api/v1/slots/:id/hold', authMiddleware, rateLimiterMiddleware, async 
                 await redis.set(`seat:${seatId}`, 'CONFIRMED');
                 return res.status(409).json({ error: `Seat ${seatId} is already confirmed` });
             }
+
+            await slotQueue.add('check-hold-expiry', { seatId }, { delay: ttlSeconds * 1000 });
+            
             return res.json({ message: `Seat ${seatId} held successfully for user ${userId}` });
         } else {
             return res.status(409).json({ error: `Seat ${seatId} is already held or confirmed` });
@@ -104,7 +118,7 @@ app.post('/api/v1/slots/:id/hold', authMiddleware, rateLimiterMiddleware, async 
     }
 });
 
-app.post('/api/v1/slots/:id/confirm', authMiddleware, rateLimiterMiddleware, async (req, res) => {
+app.post('/api/v1/slots/:id/confirm', authMiddleware, idempotencyMiddleware,rateLimiterMiddleware, async (req, res) => {
     const seatId = req.params.id;
     const userId = req.user.id;
     const seatKey = `seat:${seatId}`;
@@ -114,10 +128,14 @@ app.post('/api/v1/slots/:id/confirm', authMiddleware, rateLimiterMiddleware, asy
         const redisResult = await redis.confirmHold(seatKey, userId);
 
         if (redisResult === -1) {
-            return res.status(400).json({ error: 'Hold has expired or does not exist.' });
+            const body = { error: 'Hold has expired or does not exist.' };
+            await req.cacheIdempotentResponse(400, body);
+            return res.status(400).json(body);
         }
         if (redisResult === 0) {
-            return res.status(403).json({ error: 'Hold belongs to another user or seat is already confirmed.' });
+            const body = { error: 'Hold belongs to another user or seat is already confirmed.' };
+            await req.cacheIdempotentResponse(403, body);
+            return res.status(403).json(body);           
         }
 
         // 2. Redis hold confirmed! Now write permanently to PostgreSQL inside an ACID transaction
@@ -134,19 +152,28 @@ app.post('/api/v1/slots/:id/confirm', authMiddleware, rateLimiterMiddleware, asy
 
             await client.query('COMMIT');
 
-            return res.status(201).json({
+
+            const body = {
                 success: true,
                 message: `Seat ${seatId} successfully booked!`,
                 bookingId: result.rows[0].id,
                 timestamp: result.rows[0].created_at
-            });
+            };
+
+            await req.cacheIdempotentResponse(201,body);
+            return res.status(201).json(body);
+
+
 
         } catch (dbErr) {
             await client.query('ROLLBACK');
 
             // If DB write failed, revert Redis state or handle unique constraint gracefully
             if (dbErr.code === '23505') {
-                return res.status(409).json({ error: 'Conflict: Seat was already confirmed.' });
+
+                const body = { error: 'Conflict: Seat was already confirmed.' };
+                await req.cacheIdempotentResponse(409,body);
+                return res.status(409).json(body);
             }
             throw dbErr;
         } finally {
@@ -159,7 +186,62 @@ app.post('/api/v1/slots/:id/confirm', authMiddleware, rateLimiterMiddleware, asy
     }
 });
 
+app.post('/api/v1/slots/:id/waitlist', authMiddleware, async (req, res) => {
+    const seatId = req.params.id;
+    const userId = req.user.id;
 
-app.listen(3000, () => {
+    const waitlistKey = `waitlist:${seatId}`;
+    try {
+        await redis.zadd(waitlistKey, Date.now(), userId);
+        return res.status(201).json({ message: `User ${userId} joined the waitlist for seat ${seatId}` });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+app.post('/api/v1/queue/join', authMiddleware, async (req, res) => {
+    const userId = req.user.id;
+    try {
+        // NX = only add if not already present, so re-joining doesn't reset their position
+        await redis.zadd(WAITING_QUEUE_KEY, 'NX', Date.now(), userId);
+        return res.status(201).json({ message: 'Joined the queue.' });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/api/v1/queue/status', authMiddleware, async (req, res) => {
+    const userId = req.user.id;
+    try {
+        const admitted = await redis.get(admittedKey(userId));
+        if (admitted) {
+            return res.json({ status: 'admitted' });
+        }
+
+        const rank = await redis.zrank(WAITING_QUEUE_KEY, userId);
+        if (rank === null) {
+            return res.status(404).json({ error: 'You have not joined the queue yet.' });
+        }
+
+        return res.json({ status: 'waiting', position: rank + 1 });
+    } catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+const server = app.listen(3000, () => {
     console.log("SlotGuard engine running on port 3000");
+});
+
+
+
+setupGracefulShutdown({
+    server,
+    redis,
+    pool,
+    queue: slotQueue,
+    name: 'Server'
 });
