@@ -8,44 +8,51 @@ A distributed, high-concurrency seat/resource booking engine built to eliminate 
 
 ```mermaid
 flowchart TD
-    subgraph Layer1["1. CLIENT LAYER"]
-        direction TB
-        C1["HTTP Client\n(Hold / Confirm / Waitlist)"]
-        C2["SSE Stream Client\n(Real-Time Listener)"]
+    subgraph Client["Client"]
+        C1["HTTP request"]
+        C2["SSE stream (open connection)"]
     end
 
-    subgraph Layer2["2. MULTI-INSTANCE API CLUSTER"]
-        direction TB
-        S1["Server Instance A (PORT 3000)"]
-        S2["Server Instance B (PORT 3001)"]
-        MW["Middleware Pipeline\n(Auth ➔ Waiting Room ➔ Rate Limiter ➔ Idempotency)"]
+    subgraph API["API server (horizontally scalable)"]
+        MW["Auth, waiting room, rate limit, idempotency"]
     end
 
-    subgraph Layer3["3. SHARED REDIS IN-MEMORY LAYER"]
-        direction TB
-        LUA[("Atomic Lua Scripts\n(holdSeat / confirmHold)")]
-        KEYS[("Redis Keys & Sorted Sets\n(seat:* / waitlist:* / queue:*)")]
-        PUBSUB[("Pub/Sub Channels\n(queue:admissions / queue:reassignments)")]
-        QUEUE[("BullMQ Queue\n(hold-expiry delayed jobs)")]
+    subgraph Redis["Redis"]
+        RL[("Atomic locks<br/>holdSeat / confirmHold")]
+        RQ[("Sorted sets<br/>seat waitlist, admission queue")]
+        RP[("Pub/Sub<br/>admissions, reassignments")]
+        RB[("BullMQ queue<br/>hold-expiry jobs")]
     end
 
-    subgraph Layer4["4. DISTRIBUTED WORKER CLUSTER"]
-        direction TB
-        W1["Worker Instance 1 (WORKER_ID worker-1)"]
-        W2["Worker Instance 2 (WORKER_ID worker-2)"]
+    subgraph Worker["Background worker (horizontally scalable)"]
+        WJ["Expiry detection, reassignment, admission cycle"]
     end
 
-    subgraph Layer5["5. PERSISTENCE STORAGE LAYER"]
-        direction TB
-        DB[("PostgreSQL Database\n(bookings table + Partial Unique Index)")]
+    subgraph DB["PostgreSQL"]
+        PB[("bookings table<br/>partial unique index")]
     end
 
-    Layer1 --> Layer2
-    Layer2 --> MW
-    MW --> Layer3
-    Layer3 --> Layer4
-    Layer4 --> Layer5
-    Layer2 --> Layer5
+    C1 -->|"hold / confirm / waitlist / join"| MW
+    MW --> RL
+    MW --> RQ
+    MW -->|"schedule expiry job"| RB
+    MW -->|"ACID write"| PB
+
+    C2 -->|"GET /queue/stream"| API
+    API -->|"subscribe"| RP
+    RP -->|"push: admitted / reassigned"| API
+    API -->|"SSE event"| C2
+
+    RB -->|"job pickup, locked per-job"| WJ
+    WJ -->|"check status"| PB
+    WJ -->|"pop next in line"| RQ
+    WJ -->|"acquire new hold"| RL
+    WJ -->|"publish event"| RP
+
+    classDef store fill:#efe9ff,stroke:#7f77dd,color:#26215c
+    classDef compute fill:#e6f1fb,stroke:#378add,color:#042c53
+    class RL,RQ,RP,RB,PB store
+    class MW,WJ compute
 ```
 
 ### Core Execution Flows
