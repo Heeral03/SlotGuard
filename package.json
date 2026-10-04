@@ -9,6 +9,8 @@
     "dependencies": {
         "@bull-board/api": "^9.10.1",
         "@bull-board/express": "^9.10.1",
+        "@langchain/core": "^1.2.14",
+        "@langchain/langgraph": "^1.4.19",
         "bullmq": "^5.4.2",
         "dotenv": "^17.4.2",
         "express": "^4.18.3",

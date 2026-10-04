@@ -1,3 +1,6 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
+import jwt from 'jsonwebtoken';
 import express from 'express';
 import Redis from 'ioredis';
 import { authMiddleware } from './middleware/auth.js';
@@ -13,9 +16,15 @@ import { registerRedisCommands } from './redisCommands.js';
 import { ADMISSION_CHANNEL } from './waitingRoom.js';
 import { addClient, removeClient, sseClients } from './sseConnections.js';
 import { REASSIGNMENT_CHANNEL } from './waitingRoom.js';
+import { runClinicAgent } from './agent/langgraphAgent.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_dev_key';
 
 const app = express();
 app.use(express.json());
+app.use(express.static(path.join(__dirname, '../public')));
 
 const redis = registerRedisCommands(new Redis(process.env.REDIS_URL || 'redis://localhost:6379'));
 const subscriber = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
@@ -222,6 +231,88 @@ app.get('/api/v1/queue/stream', authMiddleware, (req, res) => {
         removeClient(userId);
         console.log(`SSE connection closed for ${userId}`);
     });
+});
+
+app.post('/api/v1/auth/login', (req, res) => {
+    const { userId } = req.body;
+    if (!userId) {
+        return res.status(400).json({ error: 'userId is required' });
+    }
+    const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '24h' });
+    return res.json({ token, userId });
+});
+
+app.post('/api/v1/agent/chat', async (req, res) => {
+    const { message, userId } = req.body;
+    if (!message) {
+        return res.status(400).json({ error: 'message string is required' });
+    }
+    try {
+        const result = await runClinicAgent(message, userId || 'user_1');
+        return res.json(result);
+    } catch (err) {
+        console.error('Agent execution error:', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/v1/slots', async (req, res) => {
+    try {
+        const numSlots = 24;
+        const slots = [];
+        
+        let dbRows = [];
+        try {
+            const dbRes = await pool.query("SELECT seat_id, user_id FROM bookings WHERE status = 'CONFIRMED'");
+            dbRows = dbRes.rows;
+        } catch (dbErr) {
+            console.warn('DB query error on slots fetch:', dbErr.message);
+        }
+        const confirmedMap = new Map();
+        dbRows.forEach(r => confirmedMap.set(String(r.seat_id), r.user_id));
+
+        for (let i = 1; i <= numSlots; i++) {
+            const seatId = String(i);
+            const seatKey = `seat:${seatId}`;
+            
+            if (confirmedMap.has(seatId)) {
+                slots.push({
+                    id: seatId,
+                    status: 'CONFIRMED',
+                    userId: confirmedMap.get(seatId)
+                });
+            } else {
+                const heldUser = await redis.get(seatKey);
+                const ttl = await redis.ttl(seatKey);
+                if (heldUser) {
+                    if (heldUser === 'CONFIRMED') {
+                        slots.push({
+                            id: seatId,
+                            status: 'CONFIRMED'
+                        });
+                    } else {
+                        slots.push({
+                            id: seatId,
+                            status: 'HELD',
+                            userId: heldUser,
+                            ttl: ttl > 0 ? ttl : 0
+                        });
+                    }
+                } else {
+                    const waitlistCount = await redis.zcard(`waitlist:${seatId}`);
+                    slots.push({
+                        id: seatId,
+                        status: 'AVAILABLE',
+                        waitlistCount
+                    });
+                }
+            }
+        }
+        return res.json({ slots });
+    } catch (err) {
+        console.error('Error fetching slots:', err);
+        return res.status(500).json({ error: 'Failed to fetch slots' });
+    }
 });
 
 

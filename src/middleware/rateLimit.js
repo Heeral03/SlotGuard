@@ -4,7 +4,7 @@ export function createRateLimiter(redisClient) {
         const identifier = req.user?.id || req.ip;
         const rateLimitKey = `ratelimit:${identifier}`;
         
-        const maxCapacity = 5;  
+        const maxCapacity = 100;  
         const windowSeconds = 60; 
         const now = Date.now() / 1000; 
 

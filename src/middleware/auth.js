@@ -5,8 +5,7 @@ const JWT_SECRET = 'super_secret_dev_key';
 
 export const authMiddleware = (req,res,next)=>{
     const authHeader = req.headers['authorization'];
-
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = (authHeader && authHeader.split(' ')[1]) || req.query.token;
     
     if(!token){
         return res.status(401).json({error: 'Unauthorized', message: 'No token provided'});

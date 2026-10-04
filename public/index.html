@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SlotGuard | Distributed Engine</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <!-- Navbar Header -->
+    <header class="navbar">
+        <div class="nav-container">
+            <div class="brand">
+                <span class="brand-text">SLOT<span class="sky-text">GUARD</span></span>
+                <span class="version-tag">v1.0</span>
+            </div>
+
+            <!-- Minimal Tab Switcher -->
+            <nav class="nav-tabs">
+                <button class="nav-tab active" data-tab="landing">ARCHITECTURE</button>
+                <button class="nav-tab" data-tab="dashboard">PODS ARENA</button>
+                <button class="nav-tab" data-tab="simulation">50-VU RACE</button>
+                <button class="nav-tab" data-tab="agent">AI AGENT</button>
+            </nav>
+
+            <div class="header-user-panel">
+                <div class="health-chip">
+                    <span class="live-dot"></span>
+                    <span id="healthLabel">ONLINE</span>
+                </div>
+                <div class="user-quick-pills">
+                    <button class="user-pill active" data-user="user_1">ALICE</button>
+                    <button class="user-pill" data-user="user_2">BOB</button>
+                    <button class="user-pill" data-user="user_3">CHARLIE</button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-wrapper">
+        <!-- TAB 1: ARCHITECTURE & HIGH-IMPACT VISUAL METRICS -->
+        <section id="landing-tab" class="tab-page active">
+            <!-- Hero Banner -->
+            <div class="hero-card">
+                <div class="hero-chip">DISTRIBUTED ATOMIC LOCK ENGINE</div>
+                <h1 class="hero-heading"><span class="sky-gradient">Zero Race Conditions.</span><br>Sub-14ms Precision.</h1>
+                
+                <div class="hero-actions">
+                    <button class="btn btn-sky btn-lg" onclick="switchTab('dashboard')">Launch Pods Arena</button>
+                    <button class="btn btn-glass btn-lg" onclick="switchTab('agent')">AI Agent Chat</button>
+                </div>
+            </div>
+
+            <!-- Visual Metrics Grid -->
+            <div class="visual-metrics-row">
+                <div class="metric-box">
+                    <div class="metric-radial">
+                        <svg width="72" height="72" viewBox="0 0 36 36" class="radial-svg">
+                            <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                            <path class="circle-val sky" stroke-dasharray="100, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                        </svg>
+                        <div class="radial-text">825</div>
+                    </div>
+                    <div class="metric-meta">
+                        <div class="metric-number">825 <span class="unit">req/s</span></div>
+                        <div class="metric-title">THROUGHPUT</div>
+                        <div class="metric-badge green-badge">100% PRECISION</div>
+                    </div>
+                </div>
+
+                <div class="metric-box">
+                    <div class="metric-radial">
+                        <svg width="72" height="72" viewBox="0 0 36 36" class="radial-svg">
+                            <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                            <path class="circle-val green" stroke-dasharray="100, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                        </svg>
+                        <div class="radial-text">1/49</div>
+                    </div>
+                    <div class="metric-meta">
+                        <div class="metric-number">1 WINNER</div>
+                        <div class="metric-title">SINGLE SEAT LOCK</div>
+                        <div class="metric-badge sky-badge">ZERO OVERBOOK</div>
+                    </div>
+                </div>
+
+                <div class="metric-box">
+                    <div class="metric-radial">
+                        <svg width="72" height="72" viewBox="0 0 36 36" class="radial-svg">
+                            <path class="circle-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                            <path class="circle-val sky" stroke-dasharray="90, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+                        </svg>
+                        <div class="radial-text">13ms</div>
+                    </div>
+                    <div class="metric-meta">
+                        <div class="metric-number">13.7 <span class="unit">ms</span></div>
+                        <div class="metric-title">LOCK LATENCY</div>
+                        <div class="metric-badge sky-badge">REDIS LUA</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visual Flow Pipeline -->
+            <div class="pipeline-card">
+                <div class="pipeline-header">
+                    <h2>PIPELINE FLOW</h2>
+                    <span class="chip sky-chip">REALTIME CIRCUIT</span>
+                </div>
+
+                <div class="pipeline-visual">
+                    <div class="pipe-node">
+                        <div class="node-name">LANGGRAPH</div>
+                        <div class="node-sub">AI Agent NLP</div>
+                    </div>
+                    <div class="pipe-connector"><div class="pulse-beam"></div></div>
+                    <div class="pipe-node">
+                        <div class="node-name">REDIS LUA</div>
+                        <div class="node-sub">Microsecond Lock</div>
+                    </div>
+                    <div class="pipe-connector"><div class="pulse-beam"></div></div>
+                    <div class="pipe-node">
+                        <div class="node-name">POSTGRES ACID</div>
+                        <div class="node-sub">Unique Index</div>
+                    </div>
+                    <div class="pipe-connector"><div class="pulse-beam"></div></div>
+                    <div class="pipe-node">
+                        <div class="node-name">LIVE SSE</div>
+                        <div class="node-sub">Event Stream</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 2: SEAT PODS ARENA -->
+        <section id="dashboard-tab" class="tab-page">
+            <div class="dashboard-layout">
+                <div class="pods-section">
+                    <div class="section-bar">
+                        <div>
+                            <h2 class="bar-title">SEAT PODS</h2>
+                        </div>
+                        <div class="pod-legend">
+                            <span class="leg-item"><span class="leg-dot avail"></span> Available</span>
+                            <span class="leg-item"><span class="leg-dot mine"></span> Your Hold</span>
+                            <span class="leg-item"><span class="leg-dot held"></span> Held</span>
+                            <span class="leg-item"><span class="leg-dot conf"></span> Booked</span>
+                        </div>
+                    </div>
+
+                    <div class="pods-grid" id="podsGrid"></div>
+                </div>
+
+                <div class="control-sidebar">
+                    <div class="glass-card action-panel">
+                        <div class="panel-head">
+                            <div class="pod-number-display" id="selectedPodNum">Pod #1</div>
+                            <div class="pod-status-badge badge-avail" id="selectedPodBadge">AVAILABLE</div>
+                        </div>
+
+                        <div class="pod-meta-box">
+                            <div class="meta-row">
+                                <span class="meta-lbl">Holder</span>
+                                <span class="meta-val" id="podHolderVal">None</span>
+                            </div>
+                            <div class="meta-row" id="ttlMetaRow" style="display:none;">
+                                <span class="meta-lbl">Expiry</span>
+                                <span class="meta-val highlight-amber" id="podTTLVal">60s</span>
+                            </div>
+                            <div class="meta-row">
+                                <span class="meta-lbl">Waitlist</span>
+                                <span class="meta-val" id="podWaitlistVal">0 Users</span>
+                            </div>
+                        </div>
+
+                        <div class="countdown-ring-box" id="countdownRingBox" style="display:none;">
+                            <svg class="ring-svg" width="90" height="90" viewBox="0 0 100 100">
+                                <circle class="ring-bg" cx="50" cy="50" r="42" />
+                                <circle class="ring-fill" id="ringFillCircle" cx="50" cy="50" r="42" stroke-dasharray="264" stroke-dashoffset="0" />
+                            </svg>
+                            <div class="ring-time-text" id="ringTimeText">60s</div>
+                        </div>
+
+                        <div class="action-btn-stack">
+                            <button class="btn btn-sky btn-full" id="holdBtn">Hold Seat (60s Lock)</button>
+                            <button class="btn btn-green btn-full" id="confirmBtn" style="display:none;">Confirm Booking (ACID)</button>
+                            <button class="btn btn-outline btn-full" id="waitlistBtn" style="display:none;">Join Waitlist</button>
+                        </div>
+
+                        <div class="status-banner" id="actionStatusBanner"></div>
+                    </div>
+
+                    <div class="glass-card queue-panel">
+                        <div class="panel-head-sm">
+                            <h3>WAITING ROOM</h3>
+                            <span class="chip sky-chip">DEMAND CONTROLLER</span>
+                        </div>
+                        <div class="queue-status-card" id="queueStatusCard">
+                            <div class="queue-large-val" id="queueValText">Not in Queue</div>
+                            <div class="queue-sub-text" id="queueSubText">Request admission</div>
+                        </div>
+                        <div class="queue-action-row">
+                            <button class="btn btn-sky btn-sm" id="joinQueueBtn">Join Queue</button>
+                            <button class="btn btn-glass btn-sm" id="checkQueueBtn">Check Rank</button>
+                        </div>
+                    </div>
+
+                    <div class="glass-card sse-terminal-panel">
+                        <div class="panel-head-sm">
+                            <h3>LIVE FEED</h3>
+                            <span class="live-pill" id="sseLivePill">SSE STREAM</span>
+                        </div>
+                        <div class="terminal-body" id="sseTerminal">
+                            <div class="term-line sys">[SSE] Stream active</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 3: 50-VU LOCK RACE ARENA -->
+        <section id="simulation-tab" class="tab-page">
+            <div class="arena-card">
+                <div class="arena-header">
+                    <div>
+                        <h2>50-VU LOCK RACE ARENA</h2>
+                    </div>
+                    <button class="btn btn-sky btn-lg" id="fireSimBtn">Fire 50-VU Concurrent Race</button>
+                </div>
+
+                <div class="sim-counter-row">
+                    <div class="count-card green">
+                        <div class="count-num" id="simWinnerCount">0</div>
+                        <div class="count-lbl">Winner (200 OK)</div>
+                    </div>
+                    <div class="count-card red">
+                        <div class="count-num" id="simConflictCount">0</div>
+                        <div class="count-lbl">Rejected (409)</div>
+                    </div>
+                    <div class="count-card sky">
+                        <div class="count-num" id="simPrecisionVal">100%</div>
+                        <div class="count-lbl">Precision</div>
+                    </div>
+                    <div class="count-card">
+                        <div class="count-num" id="simLatencyVal">-</div>
+                        <div class="count-lbl">Latency</div>
+                    </div>
+                </div>
+
+                <div class="arena-grid-wrapper">
+                    <div class="arena-grid-label">50 SIMULTANEOUS VIRTUAL USERS:</div>
+                    <div class="vu-arena-grid" id="vuArenaGrid"></div>
+                </div>
+
+                <div class="arena-log-box">
+                    <div class="terminal-body" id="simTerminal">
+                        <div class="term-line sys">Ready for 50-VU concurrency test.</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 4: LANGGRAPH AI AGENT -->
+        <section id="agent-tab" class="tab-page">
+            <div class="agent-chat-card">
+                <div class="chat-header">
+                    <div class="agent-title-box">
+                        <div class="agent-avatar">AI</div>
+                        <div>
+                            <h2>LangGraph Clinic Agent</h2>
+                            <p class="agent-subtitle">Redis Lua Locks & PostgreSQL ACID Integration</p>
+                        </div>
+                    </div>
+                    <span class="chip green-chip">LANGGRAPH</span>
+                </div>
+
+                <div class="quick-prompts-row">
+                    <span class="prompt-lbl">PROMPTS:</span>
+                    <button class="prompt-chip" data-prompt="Hold slot 7 for me">Hold slot 7 for me</button>
+                    <button class="prompt-chip" data-prompt="Confirm my booking for slot 7">Confirm my booking for slot 7</button>
+                    <button class="prompt-chip" data-prompt="Join waitlist for slot 1">Join waitlist for slot 1</button>
+                    <button class="prompt-chip" data-prompt="What slots are available?">What slots are available?</button>
+                </div>
+
+                <div class="chat-feed" id="chatFeed">
+                    <div class="chat-msg agent-msg">
+                        <div class="msg-bubble">
+                            SlotGuard AI Clinic Assistant active. You can request slot holds, booking confirmations, or waitlist status in plain language.
+                        </div>
+                    </div>
+                </div>
+
+                <form class="chat-input-bar" id="chatForm">
+                    <input type="text" class="chat-input" id="chatInput" placeholder="Ask AI agent in plain language..." autocomplete="off" />
+                    <button type="submit" class="btn btn-sky" id="sendChatBtn">Send Prompt</button>
+                </form>
+            </div>
+        </section>
+    </main>
+
+    <script src="/app.js"></script>
+</body>
+</html>

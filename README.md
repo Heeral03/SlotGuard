@@ -1,6 +1,6 @@
 # SlotGuard
 
-A distributed, high-concurrency seat/resource booking engine built to eliminate race conditions under real concurrent load, with automatic fair waitlisting, real-time SSE event notifications, and demand-spike admission control.
+A distributed, high-concurrency seat/resource booking engine built to eliminate race conditions under real concurrent load, with automatic fair waitlisting, real-time SSE event notifications, demand-spike admission control, and an intelligent **LangGraph AI Clinic Booking Agent**.
 
 ## System Architecture
 
@@ -9,55 +9,84 @@ A distributed, high-concurrency seat/resource booking engine built to eliminate 
 ```mermaid
 flowchart TD
     subgraph Client["Client"]
-        C1["HTTP request"]
-        C2["SSE stream (open connection)"]
+        C1["HTTP Request / Natural Language Prompt"]
+        C2["SSE Stream (Open Connection)"]
     end
 
-    subgraph API["API server (horizontally scalable)"]
-        MW["Auth, waiting room, rate limit, idempotency"]
+    subgraph Agent["LangGraph AI Layer"]
+        LG["StateGraph (Analyzer -> Executor -> Synthesizer)"]
+        ST["SlotGuard Dynamic Agent Tools"]
     end
 
-    subgraph Redis["Redis"]
-        RL[("Atomic locks<br/>holdSeat / confirmHold")]
-        RQ[("Sorted sets<br/>seat waitlist, admission queue")]
+    subgraph API["API Server (Horizontally Scalable)"]
+        MW["Auth, Waiting Room, Rate Limit, Idempotency"]
+    end
+
+    subgraph Redis["Redis State"]
+        RL[("Atomic Locks<br/>holdSeat / confirmHold")]
+        RQ[("Sorted Sets<br/>seat waitlist, admission queue")]
         RP[("Pub/Sub<br/>admissions, reassignments")]
-        RB[("BullMQ queue<br/>hold-expiry jobs")]
+        RB[("BullMQ Queue<br/>hold-expiry jobs")]
     end
 
-    subgraph Worker["Background worker (horizontally scalable)"]
-        WJ["Expiry detection, reassignment, admission cycle"]
+    subgraph Worker["Background Worker"]
+        WJ["Expiry Detection, Reassignment, Admission Cycle"]
     end
 
     subgraph DB["PostgreSQL"]
         PB[("bookings table<br/>partial unique index")]
     end
 
+    C1 -->|"POST /api/v1/agent/chat"| LG
+    LG --> ST
+    ST -->|"Invoke Tools"| MW
+    
     C1 -->|"hold / confirm / waitlist / join"| MW
     MW --> RL
     MW --> RQ
-    MW -->|"schedule expiry job"| RB
-    MW -->|"ACID write"| PB
+    MW -->|"Schedule Expiry Job"| RB
+    MW -->|"ACID Write"| PB
 
     C2 -->|"GET /queue/stream"| API
-    API -->|"subscribe"| RP
-    RP -->|"push: admitted / reassigned"| API
-    API -->|"SSE event"| C2
+    API -->|"Subscribe"| RP
+    RP -->|"Push: Admitted / Reassigned"| API
+    API -->|"SSE Event"| C2
 
-    RB -->|"job pickup, locked per-job"| WJ
-    WJ -->|"check status"| PB
-    WJ -->|"pop next in line"| RQ
-    WJ -->|"acquire new hold"| RL
-    WJ -->|"publish event"| RP
+    RB -->|"Job Pickup, Locked Per-Job"| WJ
+    WJ -->|"Check Status"| PB
+    WJ -->|"Pop Next in Line"| RQ
+    WJ -->|"Acquire New Hold"| RL
+    WJ -->|"Publish Event"| RP
 
     classDef store fill:#efe9ff,stroke:#7f77dd,color:#26215c
     classDef compute fill:#e6f1fb,stroke:#378add,color:#042c53
     class RL,RQ,RP,RB,PB store
-    class MW,WJ compute
+    class MW,WJ,LG,ST compute
 ```
 
 ### Core Execution Flows
 
-#### 1. Seat Hold & Confirmation Flow
+#### 1. LangGraph AI Agent Booking Flow
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User (Plain Language)
+    participant Agent as LangGraph Agent Node
+    participant API as SlotGuard API
+    participant Redis as Redis State
+    participant DB as PostgreSQL DB
+
+    User->>Agent: 1. POST /api/v1/agent/chat ("Hold slot 8 for me")
+    Agent->>Agent: 2. Intent Analyzer Node (Extracts seatId=8, intent=HOLD)
+    Agent->>API: 3. Invoke hold_clinic_slot Tool (JWT authenticated)
+    API->>Redis: 4. Execute Lua holdSeat()
+    Redis-->>API: 5. Atomic Lock Granted (60s TTL)
+    API-->>Agent: 6. Tool Result: { success: true, seatId: "8" }
+    Agent->>Agent: 7. Synthesizer Node (Clean Markdown, Zero Emojis)
+    Agent-->>User: 8. **Lock Granted:** Executed atomic Redis Lua script...
+```
+
+#### 2. Seat Hold & Confirmation Flow
 ```mermaid
 sequenceDiagram
     autonumber
@@ -78,7 +107,7 @@ sequenceDiagram
     API-->>User: 9. 201 Booking Confirmed
 ```
 
-#### 2. Hold Expiry, Waitlist Reassignment & SSE Event Push Flow
+#### 3. Hold Expiry, Waitlist Reassignment & SSE Event Push Flow
 ```mermaid
 sequenceDiagram
     autonumber
@@ -100,21 +129,19 @@ sequenceDiagram
 
 ## Core Features
 
-- **Atomic locking**: Single-threaded Redis Lua scripts (`holdSeat`, `confirmHold`) make seat holds and confirmations atomic, preventing race conditions under concurrent requests.
-- **Database backstop**: A PostgreSQL partial unique index (`WHERE status = 'CONFIRMED'`) guarantees no duplicate confirmed bookings, even if Redis state drifts.
-- **Idempotent retries**: Idempotency-key middleware ensures safe request retries after network failures, preventing duplicate confirmations.
-- **Rate limiting**: A microsecond-precision Token Bucket rate limiter (Redis Lua) throttles per-user request bursts without server crashes.
-- **Automatic waitlist reassignment**: Expired holds are detected via BullMQ delayed jobs (no polling). If a hold expires unclaimed, the next user on a Redis sorted-set waitlist is automatically reassigned the seat, with a new expiry cycle scheduled for them.
-- **Real-time SSE event streaming**: Live event stream (`GET /api/v1/queue/stream`) pushes instant status updates to clients (e.g. `seat_reassigned`, `admitted`) via Redis Pub/Sub without polling overhead.
-- **Virtual waiting room**: Optional admission-control layer that queues users fairly (FIFO, Redis sorted set) and admits them in controlled batches at a fixed interval, preventing demand-spike overload on the core booking flow.
-- **Multi-instance cluster support**: Configurable HTTP ports (`PORT`) and worker instance identifiers (`WORKER_ID`) allow running multiple server nodes and background worker workers sharing Redis and PostgreSQL state.
-- **Health checks**: `GET /health` actively probes PostgreSQL and Redis connectivity.
-- **Graceful shutdown**: Handles `SIGINT`/`SIGTERM` with a double-signal guard and a hard fallback timeout; drains in-flight work before closing HTTP server, BullMQ worker, queue, Redis, and Postgres connections in order.
-- **Job monitoring**: Bull Board dashboard (`/admin/queues`, HTTP Basic Auth protected) for inspecting queue and job state.
+- **LangGraph AI Agent**: Natural language clinic slot booking interface built with `@langchain/langgraph`. Integrates tools (`hold_clinic_slot`, `confirm_clinic_booking`, `join_slot_waitlist`, `get_available_slots`, `join_waiting_room`) that interface directly with atomic Redis Lua locks and PostgreSQL ACID transactions. Formatted to return strictly human-readable Markdown text with zero emojis.
+- **Atomic Locking**: Single-threaded Redis Lua scripts (`holdSeat`, `confirmHold`) make seat holds and confirmations atomic, preventing race conditions under high concurrent requests.
+- **Database Backstop**: A PostgreSQL partial unique index (`WHERE status = 'CONFIRMED'`) guarantees zero duplicate confirmed bookings, even if Redis state drifts.
+- **Idempotent Retries**: Idempotency-key middleware ensures safe request retries after network failures, preventing duplicate confirmations.
+- **Rate Limiting**: A microsecond-precision Token Bucket rate limiter (Redis Lua) throttles per-user request bursts without server crashes.
+- **Automatic Waitlist Reassignment**: Expired holds are detected via BullMQ delayed jobs (no polling). If a hold expires unclaimed, the next user on a Redis sorted-set waitlist is automatically reassigned the seat, with a new expiry cycle scheduled for them.
+- **Real-Time SSE Event Streaming**: Live event stream (`GET /api/v1/queue/stream`) pushes instant status updates to clients (e.g. `seat_reassigned`, `admitted`) via Redis Pub/Sub without polling overhead.
+- **Virtual Waiting Room**: Optional admission-control layer that queues users fairly (FIFO, Redis sorted set) and admits them in controlled batches at a fixed interval.
+- **High-Contrast Dark Mode UI**: 13g.fr inspired brutalist design featuring Electric Cyber Blue typography, interactive radial gauges, matrix seat pods, and live SSE terminals.
 
 ## Tech Stack
 
-Node.js, Express, Redis (ioredis, Lua scripting, Pub/Sub), PostgreSQL, BullMQ, Server-Sent Events (SSE), JWT, k6 (load testing), Terraform (local infra provisioning).
+Node.js, Express, LangGraph (`@langchain/langgraph`, `@langchain/core`), Redis (ioredis, Lua scripting, Pub/Sub), PostgreSQL, BullMQ, Server-Sent Events (SSE), JWT, HTML5/CSS3/Vanilla JS.
 
 ## Verified Benchmarks & Metrics
 
@@ -132,97 +159,13 @@ Node.js, Express, Redis (ioredis, Lua scripting, Pub/Sub), PostgreSQL, BullMQ, S
   - **Winner Lock Latency**: **`13.76 ms`**
   - **Double-Booking Error Rate**: **`0.00%`**
 
-- **Multi-Instance Cluster Scaling**: Verified across 3 containerized API servers and 2 workers (`docker compose up --scale server=3 --scale worker=2`). Holding a seat on Server Instance 2 (`port 3003`) returned `200 OK`, while attempting to hold the same seat via Server Instance 3 (`port 3004`) immediately returned `409 Conflict`, proving global Redis state enforcement across distinct Node processes.
-
-- **Distributed Worker Job Locking**: Verified across multiple background workers (`worker-1` & `worker-2`). Expiry jobs for concurrent holds were distributed evenly across workers with zero double-processing or duplicate claims due to BullMQ distributed Redis locks.
-
-- **Real-Time SSE Reassignment**: Verified instant event pushing over open SSE streams (`data: {"status":"seat_reassigned","seatId":"..."}`). Waitlisted users receive instant notifications the moment a seat hold expires.
-
-## Setup
-
-### Prerequisites
-
-- Node.js v18+
-- Redis
-- PostgreSQL
-- Terraform (optional, for local container provisioning)
-
-### Environment Variables
-
-```env
-DATABASE_URL=postgresql://username:password@localhost:5432/slotguard
-REDIS_URL=redis://localhost:6379
-JWT_SECRET=your_secret_here
-ADMIN_USER=admin
-ADMIN_PASS=admin
-WAITING_ROOM_ENABLED=false
-PORT=3000
-WORKER_ID=worker-1
-```
-
-### Database Schema
-
-```sql
-CREATE TABLE IF NOT EXISTS bookings (
-    id SERIAL PRIMARY KEY,
-    seat_id VARCHAR(255) NOT NULL,
-    user_id VARCHAR(255) NOT NULL,
-    status VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_confirmed_seat
-ON bookings (seat_id)
-WHERE status = 'CONFIRMED';
-```
-
-### Running with Docker Compose & Nginx Load Balancer
-
-The containerized stack includes PostgreSQL, Redis, horizontally scaled API servers (`server`), background workers (`worker`), and an **Nginx Reverse Proxy Load Balancer** (`http://localhost:8080`) providing upstream HTTP keep-alive connection pooling across server replicas:
-
-```bash
-# Spin up cluster with 3 server replicas, 2 worker replicas, and Nginx load balancer
-docker compose up --build -d --scale server=3 --scale worker=2
-```
-
-#### Multi-Instance Tuning & Architectural Insights:
-- **Database Connection Pool**: Configured `DB_POOL_MAX=15` per container. Because both `server.js` and `worker.js` import the same database module (`src/db.js`), 3 server replicas and 2 worker replicas previously instantiated 5 independent connection pools ($5 \times 50 = \mathbf{250}$ requested connections), exceeding PostgreSQL's default `max_connections = 100` cap and causing connection timeouts under load. Setting `max: 15` per process ($5 \times 15 = 75$ total connections) keeps total pool size safely under PostgreSQL's limit.
-- **Connection-Level vs Request-Level Round-Robin**: Nginx's default load-balancing algorithm operates at the **TCP connection level**, not per HTTP request. With client keep-alive enabled, a single TCP connection carries multiple HTTP requests pinned to the same backend instance. Enabling `keepalive 64;` in Nginx upstream settings prevents socket backlog exhaustion (111 Connection Refused) while maintaining persistent upstream connections.
-
-### Running Manually
-
-```bash
-npm install
-
-# Terminal 1: API server
-node src/server.js
-
-# Terminal 2: Background worker
-node src/worker.js
-```
-
-### Running Multi-Instance Cluster
-
-```bash
-# Terminal 1: Server A (Port 3000)
-PORT=3000 node src/server.js
-
-# Terminal 2: Server B (Port 3001)
-PORT=3001 node src/server.js
-
-# Terminal 3: Worker Instance 1
-WORKER_ID=worker-1 node src/worker.js
-
-# Terminal 4: Worker Instance 2
-WORKER_ID=worker-2 node src/worker.js
-```
-
 ## API Endpoints
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/api/v1/slots/:id/hold` | Attempt to hold a seat |
-| POST | `/api/v1/slots/:id/confirm` | Confirm a held seat (idempotent) |
+| POST | `/api/v1/agent/chat` | Natural language prompt handling via LangGraph AI Agent |
+| POST | `/api/v1/slots/:id/hold` | Attempt to hold a seat (Atomic Redis Lua script) |
+| POST | `/api/v1/slots/:id/confirm` | Confirm a held seat (PostgreSQL ACID write) |
 | POST | `/api/v1/slots/:id/waitlist` | Join the waitlist for a held seat |
 | POST | `/api/v1/queue/join` | Join the virtual waiting room |
 | GET | `/api/v1/queue/status` | Check waiting room status/position |
@@ -230,10 +173,17 @@ WORKER_ID=worker-2 node src/worker.js
 | GET | `/health` | Service health check |
 | GET | `/admin/queues` | Bull Board job dashboard (Basic Auth) |
 
-## Load Testing
-
-k6 scripts (`race-test.js`, `capacity-test.js`, `throughtput-test.js`) validate correctness and measure throughput/latency under controlled concurrency. Run with:
+## Setup & Running
 
 ```bash
-k6 run <script-name>.js
+# Install dependencies
+npm install
+
+# Terminal 1: API Server & LangGraph Agent
+node src/server.js
+
+# Terminal 2: Background Worker
+node src/worker.js
 ```
+
+Open `http://localhost:3000` in your browser to access the visual SlotGuard platform and LangGraph AI Clinic Agent interface.
