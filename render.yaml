@@ -1,0 +1,52 @@
+services:
+  # 1. API Web Service
+  - type: web
+    name: slotguard-api
+    env: node
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: slotguard-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: slotguard-redis
+          property: connectionString
+
+  # 2. BullMQ Background Worker
+  - type: worker
+    name: slotguard-worker
+    env: node
+    buildCommand: npm install
+    startCommand: node src/worker.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: WORKER_ID
+        value: worker-render-1
+      - key: DATABASE_URL
+        fromDatabase:
+          name: slotguard-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: slotguard-redis
+          property: connectionString
+
+# 3. Managed PostgreSQL Database
+databases:
+  - name: slotguard-db
+    databaseName: slotguard
+    user: slotguard_user
+
+# 4. Managed Redis Instance
+# Note: Render Redis service definition
