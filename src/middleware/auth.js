@@ -1,7 +1,7 @@
 import e from 'express';
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = 'super_secret_dev_key';
+const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_dev_key';
 
 export const authMiddleware = (req,res,next)=>{
     const authHeader = req.headers['authorization'];
